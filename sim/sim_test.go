@@ -306,3 +306,62 @@ func TestRunReportsPanicAsViolation(t *testing.T) {
 		t.Fatalf("Violation = %v, want a panic violation mentioning boom", res.Violation)
 	}
 }
+
+// Clients get IDs after the servers, talk to the servers over the network,
+// are never crashed, and are hidden from invariants but shown to the final
+// check.
+func TestRunClients(t *testing.T) {
+	var buf bytes.Buffer
+	cfg := pingConfig("chaos")
+	cfg.Duration = 10 * Second
+	cfg.Trace = &buf
+	cfg.Clients = 2
+	clientPeers := map[NodeID][]NodeID{}
+	cfg.NewClient = func(env Env) (Process, error) {
+		clientPeers[env.ID] = env.Peers
+		return &ping{env: env}, nil
+	}
+	sawClientInInvariant := false
+	cfg.NewInvariants = func() []Invariant { return []Invariant{viewSpy{saw: &sawClientInInvariant}} }
+	var final []NodeView
+	cfg.FinalCheck = func(nodes []NodeView) error { final = nodes; return nil }
+	res, err := Run(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Violation != nil {
+		t.Fatal(res.Violation)
+	}
+	if len(clientPeers) != 2 || len(clientPeers[4]) != 3 || len(clientPeers[5]) != 3 {
+		t.Fatalf("client peers = %v, want clients 4 and 5 each seeing servers 1-3", clientPeers)
+	}
+	if sawClientInInvariant {
+		t.Fatal("an invariant was shown a client")
+	}
+	if len(final) != 5 || !final[3].Client || !final[4].Client || final[0].Client {
+		t.Fatalf("final check views = %+v, want 3 servers then 2 clients", final)
+	}
+	_, recs := readTrace(t, buf.Bytes())
+	for _, r := range recs {
+		if r.Type == RecCrash && r.Node > 3 {
+			t.Fatalf("a client crashed: %+v", r)
+		}
+		if r.Type == RecDeliver && r.To > 3 && r.Kind == "pong" {
+			return // a server answered a client: done
+		}
+	}
+	t.Fatal("no server ever answered a client")
+}
+
+type viewSpy struct{ saw *bool }
+
+func (viewSpy) Name() string { return "view-spy" }
+
+func (v viewSpy) Check(nodes []NodeView) error {
+	for _, n := range nodes {
+		if n.Client {
+			*v.saw = true
+		}
+	}
+	return nil
+}
