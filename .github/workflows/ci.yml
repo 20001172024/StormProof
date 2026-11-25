@@ -41,6 +41,15 @@ jobs:
         with:
           go-version-file: go.mod
 
+      # Building buf takes about a minute and downloads ~100 modules, any of
+      # which can fail on a network hiccup. Cache the built tools; the key
+      # changes whenever a tool version in the Makefile changes.
+      - name: cache code generation tools
+        uses: actions/cache@v4
+        with:
+          path: bin
+          key: proto-tools-${{ runner.os }}-${{ hashFiles('Makefile', 'go.mod') }}
+
       - name: regenerate
         run: make proto
 

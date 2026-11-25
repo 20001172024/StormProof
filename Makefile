@@ -27,10 +27,18 @@ lint:
 tidy:
 	go mod tidy
 
-tools:
+# The stamp file's name contains every tool version, so the tools are
+# rebuilt only when a version changes. CI caches ./bin on the same basis.
+TOOLS_STAMP := $(BIN)/.tools-$(BUF_VERSION)-$(PROTOC_GEN_GO_VERSION)-$(PROTOC_GEN_GO_GRPC_VERSION)
+
+tools: $(TOOLS_STAMP)
+
+$(TOOLS_STAMP):
+	rm -f $(BIN)/.tools-*
 	GOBIN=$(BIN) go install github.com/bufbuild/buf/cmd/buf@$(BUF_VERSION)
 	GOBIN=$(BIN) go install google.golang.org/protobuf/cmd/protoc-gen-go@$(PROTOC_GEN_GO_VERSION)
 	GOBIN=$(BIN) go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@$(PROTOC_GEN_GO_GRPC_VERSION)
+	touch $@
 
 # Regenerate Go code from proto/. Generated files are committed; CI runs this
 # and fails if the result differs from what is checked in.
