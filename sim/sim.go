@@ -72,6 +72,16 @@ type Config struct {
 	NewInvariants func() []Invariant
 	// Trace receives the JSON Lines trace. Nil means no trace.
 	Trace io.Writer
+
+	// Quiet stops new crashes and partitions for the final Quiet of the
+	// run, so the cluster gets a chance to recover. Partitions and downtime
+	// already scheduled still run their course, and message loss continues.
+	Quiet Time
+	// FinalCheck, if set, runs once when the run ends without a violation.
+	// It is for liveness properties ("a leader was elected"), which can't be
+	// checked after every event because they only have to hold eventually.
+	// A non-nil error is reported as a violation named "final-check".
+	FinalCheck func(nodes []NodeView) error
 }
 
 // Result is the outcome of a run.
@@ -185,6 +195,12 @@ func Run(cfg Config) (Result, error) {
 		}
 	}
 
+	if s.res.Violation == nil && s.err == nil && cfg.FinalCheck != nil {
+		if err := cfg.FinalCheck(s.views()); err != nil {
+			s.violate("final-check", err.Error())
+		}
+	}
+
 	s.res.Steps = s.step
 	s.res.End = s.now
 	if err := s.trace.close(); err != nil && s.err == nil {
@@ -205,6 +221,8 @@ func validate(cfg Config) error {
 		return errors.New("sim: NewProcess is required")
 	case cfg.Profile.ClockSkew < 0 || cfg.Profile.ClockSkew >= 1:
 		return errors.New("sim: ClockSkew must be in [0, 1)")
+	case cfg.Quiet < 0 || cfg.Quiet > cfg.Duration:
+		return errors.New("sim: Quiet must be between 0 and Duration")
 	}
 	return nil
 }
@@ -346,6 +364,9 @@ func (s *simulation) deliver(m Message) {
 // rollFaults is called every Faults.Interval to maybe crash a node and maybe
 // start a partition.
 func (s *simulation) rollFaults() {
+	if s.now > s.cfg.Duration-s.cfg.Quiet {
+		return
+	}
 	f := s.cfg.Profile.Faults
 	if s.faults.Chance(f.CrashProb) {
 		var up []*node
@@ -392,16 +413,21 @@ func (s *simulation) checkInvariants() {
 	if len(s.invariants) == 0 {
 		return
 	}
-	views := make([]NodeView, len(s.nodes))
-	for i, n := range s.nodes {
-		views[i] = NodeView{ID: n.id, Up: n.proc != nil, Process: n.proc}
-	}
+	views := s.views()
 	for _, inv := range s.invariants {
 		if err := inv.Check(views); err != nil {
 			s.violate(inv.Name(), err.Error())
 			return
 		}
 	}
+}
+
+func (s *simulation) views() []NodeView {
+	views := make([]NodeView, len(s.nodes))
+	for i, n := range s.nodes {
+		views[i] = NodeView{ID: n.id, Up: n.proc != nil, Process: n.proc}
+	}
+	return views
 }
 
 func (s *simulation) violate(name, detail string) {
