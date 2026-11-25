@@ -10,6 +10,13 @@ linters:
     - unused
     - misspell
   settings:
+    errcheck:
+      # Printing to the terminal or a buffer: if that fails there is nothing
+      # useful left to do. Errors from writing files are still checked.
+      exclude-functions:
+        - fmt.Fprintf
+        - fmt.Fprintln
+        - fmt.Fprint
     depguard:
       rules:
         # Determinism guard (docs/design.md, "Sources of non-determinism").
