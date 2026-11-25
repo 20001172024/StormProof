@@ -4,9 +4,10 @@ import "sort"
 
 // NetworkConfig sets how the simulated network treats messages.
 type NetworkConfig struct {
-	MinDelay, MaxDelay Time    // each delivery takes a random delay in [MinDelay, MaxDelay)
-	DropProb           float64 // chance a message is lost
-	DuplicateProb      float64 // chance a message is delivered twice
+	MinDelay      Time    `json:"min_delay"`      // each delivery takes a random delay
+	MaxDelay      Time    `json:"max_delay"`      // in [MinDelay, MaxDelay)
+	DropProb      float64 `json:"drop_prob"`      // chance a message is lost
+	DuplicateProb float64 `json:"duplicate_prob"` // chance a message is delivered twice
 }
 
 // network decides the fate of each message. It never reorders on purpose:

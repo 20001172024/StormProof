@@ -20,9 +20,9 @@ var errCrashed = errors.New("sim: file handle from before a crash")
 
 // DiskConfig sets the fault probabilities for a simulated disk.
 type DiskConfig struct {
-	SyncFailProb float64 // chance each Sync fails
-	SlowSyncProb float64 // chance each Sync is slow
-	SlowSyncMax  Time    // a slow Sync adds a random delay in [0, SlowSyncMax)
+	SyncFailProb float64 `json:"sync_fail_prob"` // chance each Sync fails
+	SlowSyncProb float64 `json:"slow_sync_prob"` // chance each Sync is slow
+	SlowSyncMax  Time    `json:"slow_sync_max"`  // a slow Sync adds a random delay in [0, SlowSyncMax)
 }
 
 // Disk is an in-memory implementation of storage.FS that models what

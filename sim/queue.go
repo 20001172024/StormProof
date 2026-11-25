@@ -2,12 +2,25 @@ package sim
 
 import "container/heap"
 
+type eventKind int
+
+const (
+	evTick       eventKind = iota + 1 // a node's timer fires
+	evDeliver                         // a message arrives at its destination
+	evFaultCheck                      // the fault scheduler rolls the dice
+	evRestart                         // a crashed node comes back up
+	evHeal                            // the current partition ends
+)
+
 // event is one thing scheduled to happen at a point in virtual time.
 type event struct {
-	at  Time
-	seq uint64 // set by queue.push; breaks ties between events at the same time
+	at   Time
+	seq  uint64 // set by queue.push; breaks ties between events at the same time
+	kind eventKind
 
-	node NodeID
+	node        NodeID  // evTick, evRestart
+	incarnation int     // evTick: ignore the tick if the node restarted since
+	msg         Message // evDeliver
 }
 
 // eventHeap implements heap.Interface (Go's standard binary heap, in
