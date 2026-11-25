@@ -38,7 +38,7 @@ This pattern is borrowed in spirit from etcd's `raft` package. The payoff is
 that the same Raft code runs unchanged in production and in the simulator, so
 bugs the simulator finds are bugs in the real code path.
 
-## 2. The Raft interface *(planned, M2–M3)*
+## 2. The Raft interface
 
 `raft` exposes only these entry points:
 
@@ -52,11 +52,17 @@ bugs the simulator finds are bugs in the real code path.
 
 A `Ready` batch holds:
 
-- `HardState`: current term, vote, commit index, if changed (must be persisted)
-- `Entries`: new log entries to append to stable storage
+- `HardState`: current term and vote, if changed (must be persisted)
 - `Messages`: messages to send to peers
-- `CommittedEntries`: entries safe to apply to the state machine
-- `Snapshot`: a snapshot to save, if any (M6)
+- *(M3)* `Entries`: new log entries to append to stable storage
+- *(M3)* `CommittedEntries`: entries safe to apply to the state machine
+- *(M6)* `Snapshot`: a snapshot to save, if any
+
+Messages are one Go struct, `raft.Message`, with a `Type` and the fields
+each RPC uses, rather than generated protobuf types. That keeps `raft` free
+of dependencies; the gRPC transport converts at the edge (M7). Randomness
+comes in through a one-method `raft.Rand` interface, which `sim.Rand`
+satisfies, so `raft` never imports the simulator.
 
 ### Ordering rule
 
@@ -192,12 +198,26 @@ their own (`TestDiskCrashIsDeterministic` crashes 30 files and compares).
 A map-order bug planted in crash-victim selection, which the toy workload
 does exercise, was caught by `TestDeterminism` straight away.
 
-## 6. Invariants checked by the simulator *(planned, M2–M5)*
+## 6. Invariants checked by the simulator
 
 After every event the simulator checks the Raft safety properties (Raft paper,
-Figure 3):
+Figure 3). Implemented so far (M2, in `sim/raftsim`):
 
-- **Election safety:** at most one leader per term.
+- **Election safety:** at most one leader per term. The checker remembers
+  the leader of every term for the whole run, so a second leader is caught
+  even if the first has crashed in between.
+- **Term never decreases** on a node, even across a restart.
+- **One vote per term** on a node, even across a restart.
+
+The last two are not in Figure 3. They check the persistence rule directly:
+breaking either means a node lost state it had promised to keep.
+
+Liveness can't be checked after every event, because it only has to hold
+eventually. Runs instead end with a quiet period (no new crashes or
+partitions), after which `StableLeader` requires every node to be up and to
+agree on one leader.
+
+Still to come (M3 onwards):
 - **Log matching:** if two logs have an entry with the same index and term,
   the logs are identical up to that index.
 - **Leader completeness:** a committed entry is present in the log of every
@@ -254,7 +274,52 @@ byte-stable. The visualizer (M8) reads this format.
   in that step, but the node can still process the next event straight
   away.
 
-## 8. Real mode *(planned, M7)*
+## 8. Leader election (M2): what the simulator showed
+
+All numbers below are from actual runs with a 10 ms tick, 10 ms heartbeats
+and election timeouts drawn from 100–200 ms.
+
+**Safety and liveness.** Over 1,000 seeds across all five profiles, with 15 s
+runs ending in a 5 s quiet period, there were no violations of any invariant
+or of the final stable-leader check, with either 3 or 5 nodes.
+
+**Time to first leader** in the `calm` profile over 500 seeds: for 3 nodes,
+p50 115 ms, p99 172 ms, max 179 ms; for 5 nodes, max 260 ms.
+
+**Why the vote must be persisted.** With the HardState fsync deliberately
+skipped (`raftsim.Options.SkipSync`), the simulator reproduces the exact
+failure Figure 2's persistence rule prevents. In `crashes` seed 1, node 1
+votes for node 3 in term 1, a machine crash loses that unsynced vote, node 1
+restarts with no memory of voting, votes for itself in the same term, and
+wins: two leaders in term 1. With only election safety checked, this
+happened in 128 of 1,000 `crashes` seeds and 114 of 1,000 `chaos` seeds;
+the persistence invariants catch the lost state earlier, in almost every
+seed with a machine crash. This is a planted bug, so it is not in
+`docs/bugs/`; `TestLostVoteCausesTwoLeaders` keeps it as a regression test
+for the simulator.
+
+**Term inflation under partitions.** Over 200 seeds of 15 s:
+
+| Profile | final term (p50 / max) | leader elections (p50 / max) |
+|---|---|---|
+| calm | 1 / 1 | 1 / 1 |
+| flaky-net | 1 / 3 | 1 / 2 |
+| partitions | 20 / 47 | 5 / 9 |
+| chaos | 26 / 50 | 7 / 13 |
+
+Under partitions roughly three terms in four are elections nobody wins. That
+fits a cut-off node that keeps timing out and campaigning in ever higher
+terms. This is the problem pre-vote (Raft dissertation §9.6) addresses.
+These numbers show the inflation; they do not yet show how many needless
+leader changes it causes when a partition heals, which is what actually
+costs availability. Pre-vote is deferred until that is measured.
+
+**Known gap: no check-quorum.** A leader cut off from the majority keeps
+believing it is leader until it hears a higher term. This is safe (it can't
+commit anything without a majority), but it will matter for serving reads
+in M5, where ReadIndex has to confirm leadership first.
+
+## 9. Real mode *(planned, M7)*
 
 In real mode the `server` package plays the driver's role: a ticker goroutine
 calls `Tick` every tick interval, a gRPC handler calls `Step` for each

@@ -7,9 +7,9 @@ Raft consensus algorithm, tested by a **deterministic simulator** that injects
 crashes, partitions, message loss and disk faults, and a **time-travel
 visualizer** for replaying failures step by step.
 
-> **Status:** early development. Done: project setup (M0) and the simulator
-> foundation (M1), which currently drives a toy replicated counter. Raft
-> itself starts in M2.
+> **Status:** early development. Done: project setup (M0), the simulator
+> foundation (M1) and Raft leader election (M2). Log replication (M3) is
+> next. The KV store and gRPC API are not usable yet.
 
 ## Why it's built this way
 
@@ -47,9 +47,10 @@ make proto  # regenerate Go code from proto/ (installs pinned buf into ./bin)
 Run the simulator:
 
 ```bash
-go run ./sim/cmd/stormproof-sim -seeds 1000 -profile all                   # sweep seeds
+go run ./sim/cmd/stormproof-sim -seeds 1000 -profile all                   # sweep seeds (Raft)
 go run ./sim/cmd/stormproof-sim -seeds 1000 -buggy -trace-dir traces/      # plant a bug, save failing traces
-go run ./sim/cmd/stormproof-sim -seed 999 -buggy -trace seed-999.jsonl     # replay one seed
+go run ./sim/cmd/stormproof-sim -seed 7 -buggy -trace seed-7.jsonl         # replay one seed
+go run ./sim/cmd/stormproof-sim -node toy -seeds 1000                      # the toy counter used to test the simulator
 ```
 
 ## License

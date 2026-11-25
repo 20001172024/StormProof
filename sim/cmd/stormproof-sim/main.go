@@ -8,9 +8,9 @@
 //
 //	stormproof-sim -seed 17 -profile chaos -trace seed-17.jsonl
 //
-// Until Raft exists (M2), the simulated nodes are the toy counter from
-// package sim/toy. -buggy plants a known durability bug in it, to see the
-// simulator find one.
+// -node picks what runs on each simulated server: "raft" (the default) or
+// "toy", the replicated counter used to test the simulator itself. -buggy
+// plants a known durability bug in either, to see the simulator find it.
 package main
 
 import (
@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/20001172024/stormproof/sim"
+	"github.com/20001172024/stormproof/sim/raftsim"
 	"github.com/20001172024/stormproof/sim/toy"
 )
 
@@ -41,7 +42,9 @@ type options struct {
 	seed, start, seeds uint64
 	profiles           []sim.Profile
 	nodes              int
+	node               string
 	duration, tick     sim.Time
+	quiet              sim.Time
 	trace, traceDir    string
 	buggy              bool
 }
@@ -69,13 +72,15 @@ func parseFlags(args []string, stderr io.Writer) (options, error) {
 	var (
 		o        options
 		profile  = fl.String("profile", "chaos", `fault profile, or "all" to cycle through every profile`)
-		duration = fl.Duration("duration", 10*time.Second, "virtual time per run")
+		duration = fl.Duration("duration", 15*time.Second, "virtual time per run")
+		quiet    = fl.Duration("quiet", 5*time.Second, "no new faults in the last part of each run; raft must then have one stable leader (0 disables)")
 		tick     = fl.Duration("tick", 10*time.Millisecond, "base tick interval")
 	)
 	fl.Uint64Var(&o.seed, "seed", 0, "run just this seed (replay); 0 means run a range with -start and -seeds")
 	fl.Uint64Var(&o.start, "start", 1, "first seed of the range")
 	fl.Uint64Var(&o.seeds, "seeds", 100, "number of seeds in the range")
 	fl.IntVar(&o.nodes, "nodes", 3, "cluster size")
+	fl.StringVar(&o.node, "node", "raft", `what runs on each node: "raft" or "toy"`)
 	fl.StringVar(&o.trace, "trace", "", "with -seed: write the trace to this file")
 	fl.StringVar(&o.traceDir, "trace-dir", "", "without -seed: write a trace for each failing seed into this directory")
 	fl.BoolVar(&o.buggy, "buggy", false, "plant the toy node's durability bug")
@@ -86,6 +91,9 @@ func parseFlags(args []string, stderr io.Writer) (options, error) {
 		return o, fmt.Errorf("unexpected arguments: %v", fl.Args())
 	}
 
+	if o.node != "raft" && o.node != "toy" {
+		return o, fmt.Errorf(`-node must be "raft" or "toy", not %q`, o.node)
+	}
 	if *profile == "all" {
 		o.profiles = sim.Profiles
 	} else {
@@ -98,22 +106,39 @@ func parseFlags(args []string, stderr io.Writer) (options, error) {
 	// The simulator works in virtual microseconds.
 	o.duration = sim.Time(duration.Microseconds())
 	o.tick = sim.Time(tick.Microseconds())
+	o.quiet = sim.Time(quiet.Microseconds())
+	if o.quiet > o.duration {
+		return o, errors.New("-quiet must not be longer than -duration")
+	}
 	return o, nil
 }
 
 // config builds the simulation for one seed. With several profiles, seeds
 // are spread across them in turn, so a seed always maps to the same profile.
 func (o options) config(seed uint64, trace io.Writer) sim.Config {
-	return sim.Config{
-		Seed:          seed,
-		Nodes:         o.nodes,
-		Duration:      o.duration,
-		TickInterval:  o.tick,
-		Profile:       o.profiles[seed%uint64(len(o.profiles))],
-		NewProcess:    toy.New(o.buggy),
-		NewInvariants: func() []sim.Invariant { return []sim.Invariant{toy.Monotonic()} },
-		Trace:         trace,
+	cfg := sim.Config{
+		Seed:         seed,
+		Nodes:        o.nodes,
+		Duration:     o.duration,
+		Quiet:        o.quiet,
+		TickInterval: o.tick,
+		Profile:      o.profiles[seed%uint64(len(o.profiles))],
+		Trace:        trace,
 	}
+	switch o.node {
+	case "raft":
+		ro := raftsim.DefaultOptions
+		ro.SkipSync = o.buggy
+		cfg.NewProcess = raftsim.New(ro)
+		cfg.NewInvariants = raftsim.Invariants
+		if o.quiet > 0 {
+			cfg.FinalCheck = raftsim.StableLeader
+		}
+	case "toy":
+		cfg.NewProcess = toy.New(o.buggy)
+		cfg.NewInvariants = func() []sim.Invariant { return []sim.Invariant{toy.Monotonic()} }
+	}
+	return cfg
 }
 
 func replay(o options, stdout, stderr io.Writer) int {
