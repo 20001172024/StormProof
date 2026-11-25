@@ -233,6 +233,11 @@ func (p *Process) save(rd raft.Ready) error {
 	if err := p.env.Disk.Rename(tempFile, stateFile); err != nil {
 		return err
 	}
+	if !p.opts.SkipSync {
+		if err := p.env.Disk.SyncDir(); err != nil {
+			return err
+		}
+	}
 	p.storedHard, p.storedEntries = hs, entries
 	return nil
 }

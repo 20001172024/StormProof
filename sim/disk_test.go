@@ -12,6 +12,24 @@ import (
 
 func newTestDisk(cfg DiskConfig) *Disk { return NewDisk(cfg, NewRand(1, "disk-test")) }
 
+// create makes a file and syncs the directory, so its name survives crashes.
+func create(t *testing.T, d *Disk, name string) storage.File {
+	t.Helper()
+	f, err := d.Create(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.SyncDir(); err != nil {
+		t.Fatal(err)
+	}
+	return f
+}
+
+func exists(d *Disk, name string) bool {
+	_, err := d.ReadFile(name)
+	return err == nil
+}
+
 func write(t *testing.T, f storage.File, s string) {
 	t.Helper()
 	if _, err := f.Write([]byte(s)); err != nil {
@@ -31,7 +49,7 @@ func read(t *testing.T, d *Disk, name string) string {
 func TestDiskCrashKeepsSyncedData(t *testing.T) {
 	for _, lose := range []bool{false, true} {
 		d := newTestDisk(DiskConfig{})
-		f, _ := d.Create("a")
+		f := create(t, d, "a")
 		write(t, f, "hello")
 		if err := f.Sync(); err != nil {
 			t.Fatal(err)
@@ -61,7 +79,7 @@ func TestDiskMachineCrashLeavesPrefix(t *testing.T) {
 	seen := map[string]bool{}
 	for seed := uint64(0); seed < 500; seed++ {
 		d := NewDisk(DiskConfig{}, NewRand(seed, "disk-test"))
-		f, _ := d.Create("a")
+		f := create(t, d, "a")
 		write(t, f, synced)
 		if err := f.Sync(); err != nil {
 			t.Fatal(err)
@@ -93,7 +111,7 @@ func TestDiskMachineCrashLeavesPrefix(t *testing.T) {
 // What survives one crash is durable: a second crash must not lose it.
 func TestDiskSurvivorsAreDurable(t *testing.T) {
 	d := newTestDisk(DiskConfig{})
-	f, _ := d.Create("a")
+	f := create(t, d, "a")
 	write(t, f, "0123456789")
 	d.Crash(true)
 	after1 := read(t, d, "a")
@@ -211,7 +229,7 @@ func TestDiskCrashIsDeterministic(t *testing.T) {
 	snapshot := func() map[string]string {
 		d := NewDisk(DiskConfig{}, NewRand(9, "disk-test"))
 		for i := 0; i < 30; i++ {
-			f, _ := d.Create(fmt.Sprintf("file-%02d", i))
+			f := create(t, d, fmt.Sprintf("file-%02d", i))
 			write(t, f, "0123456789abcdef")
 		}
 		d.Crash(true)
@@ -245,4 +263,77 @@ func TestDiskStopFaults(t *testing.T) {
 	if d.takeDelay() != 0 {
 		t.Fatal("slow syncs after StopFaults")
 	}
+}
+
+// Directory changes survive a machine crash only after SyncDir; a process
+// crash keeps them.
+func TestDiskDirectoryDurability(t *testing.T) {
+	t.Run("create", func(t *testing.T) {
+		d := newTestDisk(DiskConfig{})
+		f, _ := d.Create("a")
+		write(t, f, "x")
+		_ = f.Sync()
+		d.Crash(false)
+		if !exists(d, "a") {
+			t.Fatal("process crash lost a new file")
+		}
+		d2 := newTestDisk(DiskConfig{})
+		f, _ = d2.Create("a")
+		write(t, f, "x")
+		_ = f.Sync() // data synced, but not the directory
+		d2.Crash(true)
+		if exists(d2, "a") {
+			t.Fatal("machine crash kept a file whose creation was never synced")
+		}
+	})
+	t.Run("rename reverts", func(t *testing.T) {
+		d := newTestDisk(DiskConfig{})
+		old := create(t, d, "state")
+		write(t, old, "old")
+		_ = old.Sync()
+		tmp := create(t, d, "tmp")
+		write(t, tmp, "new")
+		_ = tmp.Sync()
+		if err := d.Rename("tmp", "state"); err != nil {
+			t.Fatal(err)
+		}
+		d.Crash(true) // before SyncDir
+		if got := read(t, d, "state"); got != "old" {
+			t.Fatalf("state = %q after crash before SyncDir, want the old contents", got)
+		}
+	})
+	t.Run("rename durable after SyncDir", func(t *testing.T) {
+		d := newTestDisk(DiskConfig{})
+		tmp := create(t, d, "tmp")
+		write(t, tmp, "new")
+		_ = tmp.Sync()
+		_ = d.Rename("tmp", "state")
+		_ = d.SyncDir()
+		d.Crash(true)
+		if got := read(t, d, "state"); got != "new" || exists(d, "tmp") {
+			t.Fatalf("after SyncDir and crash: state = %q, tmp exists = %v", got, exists(d, "tmp"))
+		}
+	})
+	t.Run("remove reverts", func(t *testing.T) {
+		d := newTestDisk(DiskConfig{})
+		f := create(t, d, "a")
+		write(t, f, "x")
+		_ = f.Sync()
+		_ = d.Remove("a")
+		d.Crash(true)
+		if !exists(d, "a") {
+			t.Fatal("a remove that was never synced survived a machine crash")
+		}
+	})
+	t.Run("truncate is in place", func(t *testing.T) {
+		d := newTestDisk(DiskConfig{})
+		f := create(t, d, "a")
+		write(t, f, "durable")
+		_ = f.Sync()
+		_, _ = d.Create("a") // truncate; no sync of anything
+		d.Crash(true)
+		if got := read(t, d, "a"); got != "" {
+			t.Fatalf("a = %q: truncation should hit the file in place, not be undone", got)
+		}
+	})
 }
