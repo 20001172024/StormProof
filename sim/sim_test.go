@@ -365,3 +365,29 @@ func (v viewSpy) Check(nodes []NodeView) error {
 	}
 	return nil
 }
+
+// An injected fsync failure while a node starts is a crash, not a recovery
+// violation: the node is restarted later (bug 004).
+func TestRunSyncFailureDuringStartIsACrash(t *testing.T) {
+	cfg := pingConfig("calm")
+	cfg.Profile.Faults.MinDowntime = 10 * Millisecond
+	cfg.Profile.Faults.MaxDowntime = 20 * Millisecond
+	starts := map[NodeID]int{}
+	cfg.NewProcess = func(env Env) (Process, error) {
+		starts[env.ID]++
+		if env.ID == 2 && starts[env.ID] == 1 {
+			return nil, fmt.Errorf("repairing the log: %w", ErrSyncFailed)
+		}
+		return &ping{env: env}, nil
+	}
+	res, err := Run(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Violation != nil {
+		t.Fatalf("got violation %v, want a crash and restart", res.Violation)
+	}
+	if starts[2] != 2 || res.Stats.Crashes != 1 {
+		t.Fatalf("node 2 started %d times, %d crashes; want 2 and 1", starts[2], res.Stats.Crashes)
+	}
+}

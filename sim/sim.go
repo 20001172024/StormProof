@@ -321,6 +321,14 @@ func (s *simulation) start(n *node) {
 		Rand:  NewRand(s.cfg.Seed, fmt.Sprintf("node/%d/%d", n.id, n.incarnation)),
 		Now:   func() Time { return s.now },
 	})
+	if errors.Is(err, ErrSyncFailed) {
+		// The disk failed while the node was starting (for example while
+		// repairing a torn WAL tail). That is a fault like any other, not a
+		// sign the saved state is broken: crash the node and restart it
+		// later. (Treating it as a recovery violation was bug 004.)
+		s.crash(n, true, "failed to start: "+err.Error())
+		return
+	}
 	if err != nil {
 		s.violate("recovery", fmt.Sprintf("node %d failed to start: %v", n.id, err))
 		return
