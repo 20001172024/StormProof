@@ -5,8 +5,9 @@ Raft consensus algorithm, tested by a **deterministic simulator** that injects
 crashes, partitions, message loss and disk faults, and a **time-travel
 visualizer** for replaying failures step by step.
 
-> **Status:** early development (milestone M0: project setup). Nothing below
-> is implemented yet; the README is filled in as milestones land.
+> **Status:** early development. Done: project setup (M0) and the simulator
+> foundation (M1), which currently drives a toy replicated counter. Raft
+> itself starts in M2.
 
 ## Why it's built this way
 
@@ -39,4 +40,12 @@ Requires Go 1.24+ and golangci-lint v2.
 make test   # go test -race ./...
 make lint   # golangci-lint run ./...
 make proto  # regenerate Go code from proto/ (installs pinned buf into ./bin)
+```
+
+Run the simulator:
+
+```bash
+go run ./sim/cmd/stormproof-sim -seeds 1000 -profile all                   # sweep seeds
+go run ./sim/cmd/stormproof-sim -seeds 1000 -buggy -trace-dir traces/      # plant a bug, save failing traces
+go run ./sim/cmd/stormproof-sim -seed 999 -buggy -trace seed-999.jsonl     # replay one seed
 ```
