@@ -2,6 +2,7 @@ package sim
 
 import (
 	"errors"
+	"fmt"
 	"io/fs"
 	"slices"
 	"testing"
@@ -197,6 +198,37 @@ func TestDiskFileOperations(t *testing.T) {
 	} {
 		if !errors.Is(err, fs.ErrNotExist) {
 			t.Errorf("err = %v, want fs.ErrNotExist", err)
+		}
+	}
+}
+
+// Two disks with the same seed and the same writes must end up identical
+// after a machine crash. With many files holding unsynced data, this fails
+// if Crash ever walks the file map in Go's (deliberately random) map order.
+// The end-to-end determinism test can't catch that, because the toy node
+// only has one file at a time.
+func TestDiskCrashIsDeterministic(t *testing.T) {
+	snapshot := func() map[string]string {
+		d := NewDisk(DiskConfig{}, NewRand(9, "disk-test"))
+		for i := 0; i < 30; i++ {
+			f, _ := d.Create(fmt.Sprintf("file-%02d", i))
+			write(t, f, "0123456789abcdef")
+		}
+		d.Crash(true)
+		out := map[string]string{}
+		names, _ := d.List()
+		for _, name := range names {
+			out[name] = read(t, d, name)
+		}
+		return out
+	}
+	want := snapshot()
+	for run := 0; run < 20; run++ {
+		got := snapshot()
+		for name, w := range want {
+			if got[name] != w {
+				t.Fatalf("run %d: file %s holds %q after crash, first run had %q", run, name, got[name], w)
+			}
 		}
 	}
 }
