@@ -9,8 +9,13 @@
 //	stormproof-sim -seed 17 -profile chaos -trace seed-17.jsonl
 //
 // -node picks what runs on each simulated server: "raft" (the default) or
-// "toy", the replicated counter used to test the simulator itself. -buggy
-// plants a known durability bug in either, to see the simulator find it.
+// "toy", the replicated counter used to test the simulator itself. Raft runs
+// have -clients simulated KV clients, and end by checking the cluster
+// settled and the clients' history is linearizable.
+//
+// -bug plants a known bug, to see the simulator find it: "fsync" (both node
+// kinds; -buggy is short for it), and for raft "dedup", "local-reads" and
+// "read-quorum".
 package main
 
 import (
@@ -46,7 +51,8 @@ type options struct {
 	duration, tick     sim.Time
 	quiet              sim.Time
 	trace, traceDir    string
-	buggy              bool
+	bug                string
+	clients            int
 }
 
 // run is main without the os.Exit, so tests can call it.
@@ -83,12 +89,23 @@ func parseFlags(args []string, stderr io.Writer) (options, error) {
 	fl.StringVar(&o.node, "node", "raft", `what runs on each node: "raft" or "toy"`)
 	fl.StringVar(&o.trace, "trace", "", "with -seed: write the trace to this file")
 	fl.StringVar(&o.traceDir, "trace-dir", "", "without -seed: write a trace for each failing seed into this directory")
-	fl.BoolVar(&o.buggy, "buggy", false, "plant the toy node's durability bug")
+	buggy := fl.Bool("buggy", false, `short for -bug fsync`)
+	fl.StringVar(&o.bug, "bug", "", `plant a bug: "fsync", or for raft "dedup", "local-reads", "read-quorum"`)
+	fl.IntVar(&o.clients, "clients", raftsim.DefaultClients, "simulated KV clients (raft only)")
 	if err := fl.Parse(args); err != nil {
 		return o, err
 	}
 	if fl.NArg() > 0 {
 		return o, fmt.Errorf("unexpected arguments: %v", fl.Args())
+	}
+	if *buggy {
+		o.bug = "fsync"
+	}
+	switch {
+	case o.bug == "" || o.bug == "fsync":
+	case o.node == "raft" && (o.bug == "dedup" || o.bug == "local-reads" || o.bug == "read-quorum"):
+	default:
+		return o, fmt.Errorf("unknown -bug %q for -node %s", o.bug, o.node)
 	}
 
 	if o.node != "raft" && o.node != "toy" {
@@ -128,17 +145,38 @@ func (o options) config(seed uint64, trace io.Writer) sim.Config {
 	switch o.node {
 	case "raft":
 		ro := raftsim.DefaultOptions
-		ro.SkipSync = o.buggy
+		switch o.bug {
+		case "fsync":
+			ro.SkipSync = true
+		case "dedup":
+			ro.NoDedup = true
+		case "local-reads":
+			ro.LocalReads = true
+		case "read-quorum":
+			ro.Knobs.ReadIndexWithoutQuorum = true
+		}
+		co := raftsim.DefaultClientOptions
 		if o.quiet > 0 {
-			// Stop proposing partway through the quiet period, so the cluster
+			// Stop new work partway through the quiet period so the cluster
 			// can finish replicating, then require it to have settled.
-			ro.ProposeUntil = o.duration - min(o.quiet, 3*sim.Second)
+			stop := o.duration - min(o.quiet, 3*sim.Second)
+			ro.ProposeUntil = stop
+			co.Until, co.RetryUntil = stop, stop+(o.duration-stop)/2
 			cfg.FinalCheck = raftsim.Settled
+		}
+		if o.clients > 0 {
+			ro.ProposeProb = 0 // the clients are the workload
+			cfg.Clients = o.clients
+			cfg.NewClient = raftsim.NewClient(co)
+			cfg.FinalCheck = raftsim.Linearizable
+			if o.quiet > 0 {
+				cfg.FinalCheck = raftsim.SettledAndLinearizable
+			}
 		}
 		cfg.NewProcess = raftsim.New(ro)
 		cfg.NewInvariants = raftsim.Invariants
 	case "toy":
-		cfg.NewProcess = toy.New(o.buggy)
+		cfg.NewProcess = toy.New(o.bug == "fsync")
 		cfg.NewInvariants = func() []sim.Invariant { return []sim.Invariant{toy.Monotonic()} }
 	}
 	return cfg
