@@ -53,9 +53,10 @@ bugs the simulator finds are bugs in the real code path.
 A `Ready` batch holds:
 
 - `HardState`: current term and vote, if changed (must be persisted)
+- `Entries`: log entries to persist; if the first one's index is already
+  stored, the stored log is cut there first (a truncation)
 - `Messages`: messages to send to peers
-- *(M3)* `Entries`: new log entries to append to stable storage
-- *(M3)* `CommittedEntries`: entries safe to apply to the state machine
+- `CommittedEntries`: entries safe to apply to the state machine
 - *(M6)* `Snapshot`: a snapshot to save, if any
 
 Messages are one Go struct, `raft.Message`, with a `Type` and the fields
@@ -201,7 +202,7 @@ does exercise, was caught by `TestDeterminism` straight away.
 ## 6. Invariants checked by the simulator
 
 After every event the simulator checks the Raft safety properties (Raft paper,
-Figure 3). Implemented so far (M2, in `sim/raftsim`):
+Figure 3). All live in `sim/raftsim`. From M2:
 
 - **Election safety:** at most one leader per term. The checker remembers
   the leader of every term for the whole run, so a second leader is caught
@@ -213,20 +214,28 @@ The last two are not in Figure 3. They check the persistence rule directly:
 breaking either means a node lost state it had promised to keep.
 
 Liveness can't be checked after every event, because it only has to hold
-eventually. Runs instead end with a quiet period (no new crashes or
-partitions), after which `StableLeader` requires every node to be up and to
-agree on one leader.
+eventually. Runs instead end with a quiet period (no new injected faults),
+after which a final check runs once.
 
-Still to come (M3 onwards):
+From M3:
+
 - **Log matching:** if two logs have an entry with the same index and term,
   the logs are identical up to that index.
-- **Leader completeness:** a committed entry is present in the log of every
-  leader of a later term.
+- **Leader completeness:** a committed entry never changes, and is in the
+  log of every leader of a later term. ("Later" matters: see
+  [bug 003](bugs/003-leader-completeness-stale-leader.md).)
 - **State machine safety:** no two nodes apply different commands at the same
   index.
 
-At the end of each run, the full client history is checked for
-**linearizability** with Porcupine (M5).
+The checks skip nodes whose log hasn't changed since the last event (every
+log change passes through `Ready.Entries`, so a counter there is enough),
+which cut the cost of a run by more than half.
+
+The final check is `Settled`: every node up, one stable leader, and every
+log identical, fully committed and applied.
+
+Still to come: the full client history checked for **linearizability**
+with Porcupine (M5).
 
 ## 7. Trace format
 
@@ -319,7 +328,54 @@ believing it is leader until it hears a higher term. This is safe (it can't
 commit anything without a majority), but it will matter for serving reads
 in M5, where ReadIndex has to confirm leadership first.
 
-## 9. Real mode *(planned, M7)*
+## 9. Log replication (M3): what the simulator showed
+
+**Design choices.** The node keeps the log in memory and hands changes out
+through `Ready.Entries`. The simulator adapter rewrites one state file
+(HardState plus the whole log) per change, which is slow but obviously
+correct, and is replaced by the WAL in M4. Leaders send at most 64 entries
+per AppendEntries and don't pipeline: until a follower replies, the next
+heartbeat resends the same entries, and the receiver skips entries it
+already has. Each new leader appends a no-op. Until real clients exist
+(M5), the leader itself proposes a unique command on about one tick in ten.
+
+**Safety and liveness.** 1,000 seeds across all five profiles, 15 s runs
+ending in a 5 s quiet period: no violations of any invariant or of
+`Settled`, with 3 nodes and again with 5.
+
+**Do the invariants catch real Raft bugs?** Each bug below was planted in
+the Raft code by hand, one at a time, and run against 300 seeds across all
+profiles:
+
+| Planted bug | Seeds failing | Caught by |
+|---|---|---|
+| Skip the AppendEntries consistency check (rule 2) | 20 / 300 | log matching |
+| Truncate matching entries too (rules 3–4) | 138 / 300 | leader completeness (committed entries deleted), Settled |
+| No election restriction (§5.4.1) | 119 / 300 | leader completeness |
+| Commit earlier-term entries by counting (§5.4.2) | 0 / 300 | — |
+| Follower commits past the entries it verified (rule 5) | 0 / 300 | — (unit test `TestFollowerCommitIndex` catches it) |
+
+The second row first crashed the simulator with a panic inside the checker.
+Panics are now recorded as violations, and the checker reports "commit
+index beyond the end of the log" instead of indexing past it.
+
+**Figure 8 is out of reach of random faults.** With the current-term commit
+rule switched off (`TestingKnobs.CommitPreviousTermsByCounting`), 12,000
+random runs (3 and 5 nodes; `crashes`, `partitions` and `chaos`; with and
+without the no-op) never produced the failure. It needs five unlikely
+events in a row, in the right order. `TestFigure8` scripts it step by step
+instead: with the knob, node 1 commits an entry from term 2 and node 5 then
+overwrites it on a majority; with the real rule, the entry is never
+committed. Random search finding shallow bugs well and deep multi-step ones
+poorly is a known limit of this kind of testing, and a reason to add
+targeted fault scenarios later.
+
+**Why the no-op.** With `NoNoopOnElection`, 7 of 1,000 `chaos` seeds ended
+with entries from earlier terms still uncommitted after the quiet period:
+with proposals stopped, no current-term entry came along to commit them.
+With the no-op, 0 of 1,000.
+
+## 10. Real mode *(planned, M7)*
 
 In real mode the `server` package plays the driver's role: a ticker goroutine
 calls `Tick` every tick interval, a gRPC handler calls `Step` for each
