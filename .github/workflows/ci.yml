@@ -28,3 +28,27 @@ jobs:
 
       - name: unit tests (race detector)
         run: go test -race ./...
+
+  proto:
+    # Generated code is committed so `go build` needs no protobuf toolchain.
+    # This job regenerates it and fails if the result differs from the repo.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: regenerate
+        run: make proto
+
+      - name: check generated code is up to date
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "Generated code is stale. Run 'make proto' and commit the result."
+            git status --porcelain
+            git diff
+            exit 1
+          fi

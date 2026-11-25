@@ -1,0 +1,73 @@
+syntax = "proto3";
+
+// Client-facing key-value API. Node-to-node Raft messages are defined
+// separately (M2/M3).
+package stormproof.kv.v1;
+
+option go_package = "github.com/20001172024/stormproof/proto/stormproof/kv/v1;kvv1";
+
+// KVService is a linearizable key-value store. Errors are reported as gRPC status
+// codes (for example, a request sent to a follower is rejected so the client
+// can retry against the leader).
+service KVService {
+  rpc Get(GetRequest) returns (GetResponse);
+  rpc Put(PutRequest) returns (PutResponse);
+  rpc Delete(DeleteRequest) returns (DeleteResponse);
+  rpc CompareAndSwap(CompareAndSwapRequest) returns (CompareAndSwapResponse);
+}
+
+// RequestHeader identifies a write for exactly-once semantics. A client picks
+// a unique client_id and numbers its writes with an increasing request_id.
+// If a retry of an already-applied write arrives, the server returns the
+// saved result instead of applying it twice (M5).
+message RequestHeader {
+  uint64 client_id = 1;
+  uint64 request_id = 2;
+}
+
+message GetRequest {
+  bytes key = 1;
+}
+
+message GetResponse {
+  // found is false if the key does not exist; value is then empty.
+  bool found = 1;
+  bytes value = 2;
+}
+
+message PutRequest {
+  RequestHeader header = 1;
+  bytes key = 2;
+  bytes value = 3;
+}
+
+message PutResponse {}
+
+message DeleteRequest {
+  RequestHeader header = 1;
+  bytes key = 2;
+}
+
+message DeleteResponse {
+  // existed is true if the key was present before the delete.
+  bool existed = 1;
+}
+
+// CompareAndSwap sets key to new_value only if its current value equals
+// expected_value. If expect_absent is true, it succeeds only if the key does
+// not exist (expected_value is then ignored).
+message CompareAndSwapRequest {
+  RequestHeader header = 1;
+  bytes key = 2;
+  bytes expected_value = 3;
+  bool expect_absent = 4;
+  bytes new_value = 5;
+}
+
+message CompareAndSwapResponse {
+  // swapped is true if the write happened. On failure, found and
+  // current_value describe what was actually stored, so the caller can retry.
+  bool swapped = 1;
+  bool found = 2;
+  bytes current_value = 3;
+}
