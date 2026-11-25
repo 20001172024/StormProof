@@ -238,8 +238,8 @@ which cut the cost of a run by more than half.
 The final check is `Settled`: every node up, one stable leader, and every
 log identical, fully committed and applied.
 
-Still to come: the full client history checked for **linearizability**
-with Porcupine (M5).
+From M5, at the end of each run with clients: the full client history is
+checked for **linearizability** with Porcupine (section 11).
 
 ## 7. Trace format
 
@@ -442,7 +442,84 @@ with machine crashes can expose them):
 | Don't cut off a torn tail | 36 | the next recovery finds garbage mid-log |
 | Treat a torn tail as corruption | 46 | a node refuses to start after an ordinary crash |
 
-## 11. Real mode *(planned, M7)*
+## 11. The KV store and linearizability (M5)
+
+**The state machine** (`kv/`) applies `Put`, `Delete` and `CompareAndSwap`
+from the log and answers `Get`. Commands have a fixed binary encoding,
+which is fuzzed.
+
+**Exactly-once writes** (dissertation §6.3). Each client numbers its
+requests and reuses the number when it retries. The store keeps, per client,
+the last request it applied and its result; a retry of an applied request
+gets that result back instead of being applied again. Without this, a
+retried CompareAndSwap that had succeeded runs again, fails, and reports
+failure for a swap that happened. Sessions are never expired, which is a
+known leak: expiry has to go through the log too, so every node expires the
+same ones.
+
+**Linearizable reads with ReadIndex** (dissertation §6.4). A Get is not put
+in the log. The leader:
+
+1. refuses if it hasn't yet committed an entry in its own term (its commit
+   index might be behind what an earlier leader committed; the no-op clears
+   this within a round trip);
+2. records its commit index as the read index;
+3. sends a heartbeat tagged with a read sequence number and waits for a
+   majority to answer it, which proves nobody has replaced it as leader
+   since the read began (responses to older heartbeats don't count);
+4. waits until its state machine has applied up to the read index, then
+   answers from it.
+
+Leader leases would skip step 3 by trusting that no new leader can be
+elected before the old one's lease runs out. That saves a round trip per
+read but makes correctness depend on bounded clock drift, which is exactly
+what the simulator's clock skew attacks. Not implemented.
+
+**Simulated clients.** Six clients, separate from the servers, share the
+faulty network. Each has one request at a time on one of two keys (40% Get,
+25% Put, 25% CAS, 10% Delete; written values are unique). It follows
+"not leader" hints, resends a request that has had no answer for 300 ms to
+the next server with the same request ID, and records the call and return
+time of every operation in virtual time. A server answers a write once it
+has applied it; if a different entry committed at that index, or it lost
+leadership first, it tells the client to retry, and deduplication makes the
+retry safe.
+
+**Checking.** At the end of every run, Porcupine checks the combined
+history against a per-key model of the store. An operation that never got
+an answer is placed after every other one, which covers both "it took
+effect" and "it didn't". The history is split by key, which keeps the
+check fast: a whole 15 s run with six clients, check included, took about
+47 ms (one run, measured on the development container).
+
+**Results.** 1,000 seeds across all profiles, with 3 nodes and again with 5:
+no violations of any invariant, of `Settled`, or of linearizability. That
+was after fixing [bug 004](bugs/004-startup-fsync-failure-as-violation.md),
+which the first 5-node sweep found. Bugs planted to check the checker,
+300 seeds across the five profiles (60 per profile):
+
+| Planted bug | Seeds failing | Notes |
+|---|---|---|
+| No deduplication | 138 / 300 | 60/60 `flaky-net`, 58/60 `chaos`: lost replies cause retries |
+| Reads from local state, no ReadIndex | 13 / 300 | mostly `chaos` |
+| ReadIndex without the leadership check | 8 / 300 | `chaos` and `partitions` |
+| Skip fsync (as before) | 120 / 300 | every seed on a profile with machine crashes |
+
+**Stale reads are hard to provoke at random.** The classic case is a leader
+cut off by a partition that keeps serving reads after a new leader has
+committed a write. For it to show, one client must complete a write through
+the new leader and then another must read the same key from the old one.
+But a client talking to the old leader moves away at its first write,
+which times out, so the window is small. With five keys and three clients
+the leadership-check bug was caught in 0 of 200 seeds (50 in each of the
+four fault profiles). Two changes were
+tried: letting partitions cut off clients too made no measurable difference
+and was dropped; six clients on two keys (more overlap on the same key)
+raised it to the numbers above and became the default.
+`TestReadIndexDeposedLeader` scripts the scenario step by step, as
+`TestFigure8` does, so the leadership check is covered deterministically.
+
+## 12. Real mode *(planned, M7)*
 
 In real mode the `server` package plays the driver's role: a ticker goroutine
 calls `Tick` every tick interval, a gRPC handler calls `Step` for each
