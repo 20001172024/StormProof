@@ -1,5 +1,7 @@
 # StormProof
 
+[![ci](https://github.com/20001172024/StormProof/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/20001172024/StormProof/actions/workflows/ci.yml)
+
 A replicated key-value store built on a from-scratch implementation of the
 Raft consensus algorithm, tested by a **deterministic simulator** that injects
 crashes, partitions, message loss and disk faults, and a **time-travel
@@ -49,3 +51,7 @@ go run ./sim/cmd/stormproof-sim -seeds 1000 -profile all                   # swe
 go run ./sim/cmd/stormproof-sim -seeds 1000 -buggy -trace-dir traces/      # plant a bug, save failing traces
 go run ./sim/cmd/stormproof-sim -seed 999 -buggy -trace seed-999.jsonl     # replay one seed
 ```
+
+## License
+
+MIT. See [LICENSE](LICENSE).
