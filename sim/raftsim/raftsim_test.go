@@ -9,6 +9,14 @@ import (
 	"github.com/20001172024/stormproof/sim"
 )
 
+// testOptions stops proposals at 12 s, leaving the last 3 s of a 15 s run
+// to finish replicating.
+func testOptions() Options {
+	o := DefaultOptions
+	o.ProposeUntil = 12 * sim.Second
+	return o
+}
+
 func config(seed uint64, profile string, o Options) sim.Config {
 	p, err := sim.ProfileByName(profile)
 	if err != nil {
@@ -23,7 +31,7 @@ func config(seed uint64, profile string, o Options) sim.Config {
 		Profile:       p,
 		NewProcess:    New(o),
 		NewInvariants: Invariants,
-		FinalCheck:    StableLeader,
+		FinalCheck:    Settled,
 	}
 }
 
@@ -43,7 +51,7 @@ func TestElectionUnderAllProfiles(t *testing.T) {
 		for _, nodes := range []int{3, 5} {
 			t.Run(fmt.Sprintf("%s/%d-nodes", p.Name, nodes), func(t *testing.T) {
 				for seed := uint64(1); seed <= 40; seed++ {
-					cfg := config(seed, p.Name, DefaultOptions)
+					cfg := config(seed, p.Name, testOptions())
 					cfg.Nodes = nodes
 					if res := run(t, cfg); res.Violation != nil {
 						t.Fatalf("seed %d: %v", seed, res.Violation)
@@ -58,9 +66,10 @@ func TestElectionUnderAllProfiles(t *testing.T) {
 // timeout is at most 200 ms, so 1 s leaves room for a split vote or two.
 func TestLeaderElectedQuicklyWhenCalm(t *testing.T) {
 	for seed := uint64(1); seed <= 100; seed++ {
-		cfg := config(seed, "calm", DefaultOptions)
+		cfg := config(seed, "calm", testOptions())
 		cfg.Duration = 1 * sim.Second
 		cfg.Quiet = 0
+		cfg.FinalCheck = StableLeader // proposals are still in flight at 1 s
 		if res := run(t, cfg); res.Violation != nil {
 			t.Fatalf("seed %d: %v", seed, res.Violation)
 		}
@@ -73,7 +82,7 @@ func TestDeterminism(t *testing.T) {
 			traces := make([][]byte, 2)
 			for i := range traces {
 				var buf bytes.Buffer
-				cfg := config(seed, p.Name, DefaultOptions)
+				cfg := config(seed, p.Name, testOptions())
 				cfg.Trace = &buf
 				run(t, cfg)
 				traces[i] = buf.Bytes()
@@ -85,13 +94,38 @@ func TestDeterminism(t *testing.T) {
 	}
 }
 
+// The workload actually commits commands, under every profile.
+func TestWorkloadCommits(t *testing.T) {
+	for _, p := range sim.Profiles {
+		cfg := config(1, p.Name, testOptions())
+		var commands int
+		cfg.FinalCheck = func(nodes []sim.NodeView) error {
+			if err := Settled(nodes); err != nil {
+				return err
+			}
+			for _, e := range proc(nodes[0]).Applied() {
+				if e.Data != nil {
+					commands++
+				}
+			}
+			return nil
+		}
+		if res := run(t, cfg); res.Violation != nil {
+			t.Fatalf("%s: %v", p.Name, res.Violation)
+		}
+		if commands < 20 {
+			t.Errorf("%s: only %d commands committed in a 15 s run", p.Name, commands)
+		}
+	}
+}
+
 // The reason Figure 2 requires votedFor to be persisted before replying:
 // with the fsync skipped, a machine crash makes a node forget its vote, vote
 // again in the same term, and two leaders get elected. Only election safety
 // is checked here, to show the bug reaches it (the persistence invariants
 // would catch it earlier).
 func TestLostVoteCausesTwoLeaders(t *testing.T) {
-	buggy := DefaultOptions
+	buggy := testOptions()
 	buggy.SkipSync = true
 	onlySafety := func() []sim.Invariant {
 		for _, inv := range Invariants() {
@@ -125,20 +159,25 @@ func TestLostVoteCausesTwoLeaders(t *testing.T) {
 		t.Fatalf("replay gave %v, first run gave %v", replay.Violation, failing.Violation)
 	}
 	// Same seed, same faults, bug fixed: no violation.
-	if res := run(t, config(failing.Seed, "crashes", DefaultOptions)); res.Violation != nil {
+	if res := run(t, config(failing.Seed, "crashes", testOptions())); res.Violation != nil {
 		t.Fatalf("seed %d fails with the bug fixed too: %v", failing.Seed, res.Violation)
 	}
 }
 
 func TestHardStateRoundTrip(t *testing.T) {
 	disk := sim.NewDisk(sim.DiskConfig{}, sim.NewRand(1, "disk"))
-	env := sim.Env{ID: 1, Peers: []sim.NodeID{2, 3}, Disk: disk, Rand: sim.NewRand(1, "node")}
+	env := sim.Env{ID: 1, Peers: []sim.NodeID{2, 3}, Disk: disk, Rand: sim.NewRand(1, "node"), Now: func() sim.Time { return 0 }}
 	p, err := open(env, DefaultOptions)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := raft.HardState{Term: 7, Vote: 3}
-	if err := p.save(want); err != nil {
+	hs := raft.HardState{Term: 7, Vote: 3}
+	es := []raft.Entry{{Index: 1, Term: 2}, {Index: 2, Term: 7, Data: []byte("x")}, {Index: 3, Term: 7, Data: []byte("y")}}
+	if err := p.save(raft.Ready{HardState: &hs, Entries: es}); err != nil {
+		t.Fatal(err)
+	}
+	// Replace the tail from index 2, as after a conflict with a new leader.
+	if err := p.save(raft.Ready{Entries: []raft.Entry{{Index: 2, Term: 8, Data: []byte("z")}}}); err != nil {
 		t.Fatal(err)
 	}
 	disk.Crash(true)
@@ -149,6 +188,11 @@ func TestHardStateRoundTrip(t *testing.T) {
 	if st := p2.Status(); st.Term != 7 || st.Vote != 3 {
 		t.Fatalf("recovered %+v, want term 7 vote 3", st)
 	}
+	want := []raft.Entry{{Index: 1, Term: 2}, {Index: 2, Term: 8, Data: []byte("z")}}
+	got := p2.Entries()
+	if len(got) != len(want) || !sameEntry(got[0], want[0]) || !sameEntry(got[1], want[1]) {
+		t.Fatalf("recovered log %+v, want %+v", got, want)
+	}
 }
 
 func TestCorruptHardStateRefusesToStart(t *testing.T) {
@@ -157,7 +201,7 @@ func TestCorruptHardStateRefusesToStart(t *testing.T) {
 	_, _ = f.Write([]byte{1, 2, 3})
 	env := sim.Env{ID: 1, Peers: []sim.NodeID{2}, Disk: disk, Rand: sim.NewRand(1, "node")}
 	if _, err := open(env, DefaultOptions); err == nil {
-		t.Fatal("started from a 3-byte hardstate file")
+		t.Fatal("started from a 3-byte state file")
 	}
 }
 
@@ -219,6 +263,82 @@ func TestInvariantsDetectViolations(t *testing.T) {
 		_ = inv.Check([]sim.NodeView{view(1, proc(raft.Status{ID: 1, Term: 5, Vote: 2}))})
 		if err := inv.Check([]sim.NodeView{view(1, proc(raft.Status{ID: 1, Term: 5, Vote: 3}))}); err == nil {
 			t.Fatal("vote for 2 then 3 in term 5 not detected")
+		}
+	})
+}
+
+// fakeProc builds a Process whose node has the given log and commit index,
+// for exercising invariants directly.
+func fakeProc(t *testing.T, id sim.NodeID, term raft.Term, log []raft.Entry, commitTo uint64) *Process {
+	t.Helper()
+	n, err := raft.NewNode(raft.Config{
+		ID: raft.NodeID(id), Peers: []raft.NodeID{99}, ElectionTicks: 10, HeartbeatTicks: 1,
+		Rand: sim.NewRand(1, "x"), HardState: raft.HardState{Term: term}, Entries: log,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Advance the commit index through the real AppendEntries path.
+	if commitTo > 0 {
+		n.Step(raft.Message{Type: raft.MsgApp, From: 99, To: raft.NodeID(id), Term: term,
+			PrevLogIndex: commitTo, PrevLogTerm: log[commitTo-1].Term, LeaderCommit: commitTo})
+		n.Advance()
+	}
+	return &Process{node: n}
+}
+
+func e(i uint64, t raft.Term, data string) raft.Entry {
+	return raft.Entry{Index: i, Term: t, Data: []byte(data)}
+}
+
+func TestLogInvariantsDetectViolations(t *testing.T) {
+	find := func(name string) sim.Invariant {
+		for _, inv := range Invariants() {
+			if inv.Name() == name {
+				return inv
+			}
+		}
+		t.Fatalf("no invariant %q", name)
+		return nil
+	}
+	up := func(id sim.NodeID, p *Process) sim.NodeView { return sim.NodeView{ID: id, Up: true, Process: p} }
+
+	t.Run("log matching", func(t *testing.T) {
+		inv := find("log-matching")
+		ok := []sim.NodeView{
+			up(1, fakeProc(t, 1, 3, []raft.Entry{e(1, 1, "a"), e(2, 2, "b")}, 0)),
+			up(2, fakeProc(t, 2, 3, []raft.Entry{e(1, 1, "a"), e(2, 3, "c")}, 0)), // diverge after a match: fine
+		}
+		if err := inv.Check(ok); err != nil {
+			t.Fatalf("legal divergence flagged: %v", err)
+		}
+		bad := []sim.NodeView{
+			up(1, fakeProc(t, 1, 3, []raft.Entry{e(1, 1, "a"), e(2, 2, "b")}, 0)),
+			up(2, fakeProc(t, 2, 3, []raft.Entry{e(1, 1, "z"), e(2, 2, "b")}, 0)), // agree at 2, differ at 1
+		}
+		if err := inv.Check(bad); err == nil {
+			t.Fatal("logs agreeing at index 2 but differing at 1 not detected")
+		}
+	})
+
+	t.Run("committed entry changes", func(t *testing.T) {
+		inv := find("leader-completeness")
+		if err := inv.Check([]sim.NodeView{up(1, fakeProc(t, 1, 2, []raft.Entry{e(1, 1, "a"), e(2, 2, "b")}, 2))}); err != nil {
+			t.Fatal(err)
+		}
+		if err := inv.Check([]sim.NodeView{up(2, fakeProc(t, 2, 3, []raft.Entry{e(1, 1, "a"), e(2, 3, "c")}, 2))}); err == nil {
+			t.Fatal("entry 2 committed as b and then as c: not detected")
+		}
+	})
+
+	t.Run("state machine safety", func(t *testing.T) {
+		inv := find("state-machine-safety")
+		a := fakeProc(t, 1, 2, nil, 0)
+		a.applied = []raft.Entry{e(1, 1, "a"), e(2, 2, "b")}
+		b := fakeProc(t, 2, 2, nil, 0)
+		b.applied = []raft.Entry{e(1, 1, "a"), e(2, 2, "DIFFERENT")}
+		if err := inv.Check([]sim.NodeView{up(1, a), up(2, b)}); err == nil {
+			t.Fatal("two nodes applying different entries at index 2 not detected")
 		}
 	})
 }

@@ -73,7 +73,7 @@ func parseFlags(args []string, stderr io.Writer) (options, error) {
 		o        options
 		profile  = fl.String("profile", "chaos", `fault profile, or "all" to cycle through every profile`)
 		duration = fl.Duration("duration", 15*time.Second, "virtual time per run")
-		quiet    = fl.Duration("quiet", 5*time.Second, "no new faults in the last part of each run; raft must then have one stable leader (0 disables)")
+		quiet    = fl.Duration("quiet", 5*time.Second, "no new faults in the last part of each run; raft must then settle on one leader with every log identical and applied (0 disables)")
 		tick     = fl.Duration("tick", 10*time.Millisecond, "base tick interval")
 	)
 	fl.Uint64Var(&o.seed, "seed", 0, "run just this seed (replay); 0 means run a range with -start and -seeds")
@@ -129,11 +129,14 @@ func (o options) config(seed uint64, trace io.Writer) sim.Config {
 	case "raft":
 		ro := raftsim.DefaultOptions
 		ro.SkipSync = o.buggy
+		if o.quiet > 0 {
+			// Stop proposing partway through the quiet period, so the cluster
+			// can finish replicating, then require it to have settled.
+			ro.ProposeUntil = o.duration - min(o.quiet, 3*sim.Second)
+			cfg.FinalCheck = raftsim.Settled
+		}
 		cfg.NewProcess = raftsim.New(ro)
 		cfg.NewInvariants = raftsim.Invariants
-		if o.quiet > 0 {
-			cfg.FinalCheck = raftsim.StableLeader
-		}
 	case "toy":
 		cfg.NewProcess = toy.New(o.buggy)
 		cfg.NewInvariants = func() []sim.Invariant { return []sim.Invariant{toy.Monotonic()} }
