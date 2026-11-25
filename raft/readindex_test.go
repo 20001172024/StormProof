@@ -134,3 +134,39 @@ func TestReadIndexWithoutQuorumKnob(t *testing.T) {
 		t.Fatal("with the knob, the read should be confirmed with no acknowledgements")
 	}
 }
+
+// The deposed-leader stale read, scripted (the random simulator rarely sets
+// it up; see docs/design.md). Node 1 leads, is cut off, and node 2 is
+// elected and commits a write. Node 1 still believes it leads. A read at
+// node 1 must not be confirmed: if it were, node 1 would answer from a
+// state machine that lacks the write. TestingKnobs.ReadIndexWithoutQuorum
+// shows exactly that happening.
+func TestReadIndexDeposedLeader(t *testing.T) {
+	for _, unsafe := range []bool{false, true} {
+		c := newCluster(t, 3)
+		c.elect(1)
+		cutOff := map[NodeID]bool{1: true}
+		c.drop = func(m Message) bool { return cutOff[m.From] || cutOff[m.To] }
+		c.campaign(2)
+		c.propose(2, "the write")
+		c.heartbeat(2)
+		written := c.nodes[2].commitIndex
+
+		old := c.nodes[1]
+		old.cfg.Knobs.ReadIndexWithoutQuorum = unsafe
+		if old.role != Leader {
+			t.Fatal("setup: node 1 should still believe it leads")
+		}
+		if err := old.ReadIndex(77); err != nil {
+			t.Fatal(err)
+		}
+		c.settle()
+		confirmed := len(c.reads[1]) == 1
+		if confirmed != unsafe {
+			t.Fatalf("unsafe=%v: read confirmed = %v", unsafe, confirmed)
+		}
+		if confirmed && c.reads[1][0].Index >= written {
+			t.Fatalf("setup: the stale read index %d already covers the write at %d", c.reads[1][0].Index, written)
+		}
+	}
+}
