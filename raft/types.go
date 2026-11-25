@@ -1,0 +1,127 @@
+package raft
+
+// NodeID identifies a server in the cluster. 0 means "nobody" (see None).
+type NodeID uint64
+
+// None is the NodeID used for "no node": no vote cast, no known leader.
+const None NodeID = 0
+
+// Term is a Raft term number (§5.1). Terms act as a logical clock: each
+// election starts a new, higher term, and every message carries the
+// sender's term so out-of-date nodes find out they are behind.
+type Term uint64
+
+// Role is the role a node currently plays (§5.1, Figure 4).
+type Role int
+
+const (
+	Follower Role = iota
+	Candidate
+	Leader
+)
+
+func (r Role) String() string {
+	switch r {
+	case Follower:
+		return "follower"
+	case Candidate:
+		return "candidate"
+	case Leader:
+		return "leader"
+	}
+	return "unknown"
+}
+
+// MarshalText makes roles appear as words ("leader") in JSON traces.
+func (r Role) MarshalText() ([]byte, error) { return []byte(r.String()), nil }
+
+// MessageType is the kind of a Message. Each RPC in the paper is a pair of
+// message types: a request and its response.
+type MessageType int
+
+const (
+	MsgVote     MessageType = iota + 1 // RequestVote RPC (§5.2)
+	MsgVoteResp                        // reply to RequestVote
+	MsgApp                             // AppendEntries RPC (§5.3); in M2 only empty heartbeats
+	MsgAppResp                         // reply to AppendEntries
+)
+
+func (t MessageType) String() string {
+	switch t {
+	case MsgVote:
+		return "RequestVote"
+	case MsgVoteResp:
+		return "RequestVoteResponse"
+	case MsgApp:
+		return "AppendEntries"
+	case MsgAppResp:
+		return "AppendEntriesResponse"
+	}
+	return "unknown"
+}
+
+// MarshalText makes message types appear by name in JSON traces.
+func (t MessageType) MarshalText() ([]byte, error) { return []byte(t.String()), nil }
+
+// Message is every message Raft nodes exchange. Rather than one Go type per
+// RPC, there is one struct and each Type uses a documented subset of the
+// fields (the same approach as etcd's raft). That keeps Step a single entry
+// point and the transport a single message type.
+//
+// The fields map to the RPC arguments and results in Figure 2:
+//
+//	RequestVote          Term, From (candidateId), LastLogIndex, LastLogTerm
+//	RequestVoteResponse  Term, VoteGranted
+//	AppendEntries        Term, From (leaderId)        (log fields arrive in M3)
+//	AppendEntriesResp    Term, Success
+type Message struct {
+	Type MessageType `json:"type"`
+	From NodeID      `json:"from"`
+	To   NodeID      `json:"to"`
+	Term Term        `json:"term"`
+
+	LastLogIndex uint64 `json:"last_log_index,omitempty"`
+	LastLogTerm  Term   `json:"last_log_term,omitempty"`
+	VoteGranted  bool   `json:"vote_granted,omitempty"`
+	Success      bool   `json:"success,omitempty"`
+}
+
+// HardState is the state Figure 2 calls "persistent state on all servers"
+// (apart from the log, which arrives in M3). It must be on stable storage
+// before the node sends any message that depends on it: a node that votes,
+// replies, crashes and forgets its vote could vote again in the same term
+// and help elect a second leader.
+type HardState struct {
+	Term Term   `json:"term"` // currentTerm
+	Vote NodeID `json:"vote"` // votedFor in Term, or None
+}
+
+// Ready is the work a node hands back to its caller. The caller must:
+//
+//  1. persist HardState, if it is non-nil, and wait for that to finish
+//  2. only then send Messages
+//  3. call Advance
+//
+// The order matters for the reason given on HardState.
+type Ready struct {
+	HardState *HardState // nil if unchanged since the last Ready
+	Messages  []Message
+}
+
+// Status is a read-only snapshot of a node, for tests, invariants, the
+// trace and (later) metrics.
+type Status struct {
+	ID     NodeID `json:"id"`
+	Role   Role   `json:"role"`
+	Term   Term   `json:"term"`
+	Vote   NodeID `json:"vote"`
+	Leader NodeID `json:"leader"` // the leader of Term as far as this node knows, or None
+}
+
+// Rand is the randomness a node needs: picking election timeouts. It is
+// passed in so the simulator can supply a seeded generator; sim.Rand
+// satisfies it.
+type Rand interface {
+	// Intn returns a uniform random int in [0, n).
+	Intn(n int) int
+}
