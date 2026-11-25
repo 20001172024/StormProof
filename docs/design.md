@@ -113,7 +113,11 @@ only `Sync` makes them durable. Crashes come in two kinds:
   still writes out everything; nothing is lost.
 - **Machine crash** (power loss): each file keeps its durable bytes plus a
   random-length prefix of the rest. That covers losing all unsynced data,
-  keeping all of it, and torn writes in between.
+  keeping all of it, and torn writes in between. The directory also reverts
+  to its last `SyncDir`, so a file created, renamed or removed since then
+  can be undone (a classic source of real bugs: the data was fsynced, but
+  the file's name never was). Truncating a file with `Create` happens in
+  place and is not undone.
 
 A failed `Sync` leaves the data non-durable. A process that gets an error
 from its disk returns it, and the simulator crashes the node as a machine
@@ -271,10 +275,10 @@ byte-stable. The visualizer (M8) reads this format.
 
 ## Known simplifications
 
-- **File metadata is durable immediately.** In the simulated disk, create,
-  rename and remove survive any crash. On a real file system they also need
-  the directory to be fsynced. This may be tightened in M4, when the real
-  WAL needs it.
+- **Torn writes keep a clean prefix.** A machine crash keeps a prefix of
+  the unsynced bytes, never garbage after them. Real disks can also leave a
+  torn sector with garbage in it; the WAL would report that as corruption
+  rather than as a torn tail (see section 10).
 - **Seeds reproduce within one Go version.** The random streams come from
   `math/rand/v2`, whose algorithms Go could in principle change between
   releases. Traces recorded under one Go version are not guaranteed to
@@ -331,9 +335,9 @@ in M5, where ReadIndex has to confirm leadership first.
 ## 9. Log replication (M3): what the simulator showed
 
 **Design choices.** The node keeps the log in memory and hands changes out
-through `Ready.Entries`. The simulator adapter rewrites one state file
-(HardState plus the whole log) per change, which is slow but obviously
-correct, and is replaced by the WAL in M4. Leaders send at most 64 entries
+through `Ready.Entries`. In M3 the simulator adapter rewrote one state
+file (HardState plus the whole log) per change, which was slow but obviously
+correct; M4 replaced it with the WAL. Leaders send at most 64 entries
 per AppendEntries and don't pipeline: until a follower replies, the next
 heartbeat resends the same entries, and the receiver skips entries it
 already has. Each new leader appends a no-op. Until real clients exist
@@ -375,7 +379,70 @@ with entries from earlier terms still uncommitted after the quiet period:
 with proposals stopped, no current-term entry came along to commit them.
 With the no-op, 0 of 1,000.
 
-## 10. Real mode *(planned, M7)*
+## 10. Persistence (M4): the write-ahead log
+
+**Format.** `storage/wal` writes records of `length u32 | CRC-32C u32 |
+type | payload`. Each `raft.Ready` becomes at most two records (HardState,
+Entries) followed by a single fsync, which is the durability point. Records
+are only appended: an Entries record whose first index is already in the
+log replaces everything from that index on, which is how a truncation is
+recorded. That is the `Ready.Entries` contract from M3, so there is no
+"truncate" record. The log is split into segment files `wal-<seq>.log`; a
+new segment's directory entry is fsynced before anything is written to it.
+Old segments are never deleted until snapshots (M6).
+
+**Recovery.** Records are replayed in order. A record cut short at the end
+of the **last** segment is a torn tail: a crash during an append, whose
+fsync never completed, so nothing was acknowledged on the strength of it.
+It is cut off by atomically rewriting the segment without it. Anything
+else, such as a bad checksum anywhere, a cut-short record in an earlier
+segment, a missing segment or an entry that leaves a gap, is corruption,
+and the node refuses to start rather than guess.
+
+The trade-off: a complete record with a bad checksum at the very end of the
+log is treated as corruption, not as a torn tail. That is the strict
+choice. It can refuse to start after a torn sector that left garbage behind
+(which the simulated disk doesn't model), but it never silently drops a
+record that was acknowledged and later damaged.
+
+**fsync policy.** `SyncAlways` (the default) fsyncs every Save.
+`SyncNever` exists only to measure what the fsyncs cost (M10); a machine
+crash can then lose acknowledged state, which can break Raft's guarantees.
+`TestSyncNeverCanLoseData` checks that it really does.
+
+**The real file system.** `storage.OSFS` implements the same `storage.FS`
+interface on a directory, with `SyncDir` fsyncing the directory itself.
+
+**Testing the WAL itself.**
+
+- Cutting the log at **every byte offset** must recover exactly the state
+  of the last complete record, and leave a WAL that keeps working.
+- Each kind of corruption is refused.
+- 200 machine crashes at random points with random tear lengths never lose
+  an acknowledged Save, across segment rotations.
+- Two fuzz targets: the record decoder (any accepted record re-encodes to
+  the same bytes) and `Open` on arbitrary segment contents (never panics).
+  Each ran for 45 s locally with no failures; CI runs their seed corpora as
+  ordinary tests.
+- Five bugs planted in the WAL by hand were all caught by the unit tests.
+  The first attempt at "skip the checksum check" seemed to survive, but
+  only because the mutation stopped the package compiling.
+
+**What the simulator showed.** The simulator's WAL segments are 1 KiB. At
+the original 16 KiB, a 15 s run never rotated a segment, so rotation went
+untested; at 1 KiB every run rotates several times. With the WAL, 1,000
+seeds across all profiles had no violations, with 3 nodes and again with 5.
+Bugs planted in the WAL, 300 seeds each (only the 120 seeds on profiles
+with machine crashes can expose them):
+
+| Planted WAL bug | Seeds failing | How it showed up |
+|---|---|---|
+| Never fsync | 119 | a node refuses to start (torn record mid-log), or forgets its term |
+| No directory sync for a new segment | 120 | term goes back to 0: the first segment vanished |
+| Don't cut off a torn tail | 36 | the next recovery finds garbage mid-log |
+| Treat a torn tail as corruption | 46 | a node refuses to start after an ordinary crash |
+
+## 11. Real mode *(planned, M7)*
 
 In real mode the `server` package plays the driver's role: a ticker goroutine
 calls `Tick` every tick interval, a gRPC handler calls `Step` for each
