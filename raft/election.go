@@ -85,8 +85,9 @@ func (n *Node) handleVoteResponse(m Message) {
 // term, then whichever log is longer is more up-to-date."
 //
 // This check is what makes sure a node missing committed entries can never
-// win an election. In M2 every log is empty, so it always passes; it starts
-// to matter in M3.
+// win an election (leader completeness): a committed entry is on a
+// majority, any majority of voters includes one of those nodes, and that
+// node refuses to vote for a candidate whose log is behind its own.
 func logUpToDate(candTerm Term, candIndex uint64, ourTerm Term, ourIndex uint64) bool {
 	if candTerm != ourTerm {
 		return candTerm > ourTerm
@@ -94,7 +95,6 @@ func logUpToDate(candTerm Term, candIndex uint64, ourTerm Term, ourIndex uint64)
 	return candIndex >= ourIndex
 }
 
-// lastLogIndex and lastLogTerm describe the last entry in the log. The log
-// is added in M3; until then it is always empty.
-func (n *Node) lastLogIndex() uint64 { return 0 }
-func (n *Node) lastLogTerm() Term    { return 0 }
+// lastLogIndex and lastLogTerm describe the last entry in the log.
+func (n *Node) lastLogIndex() uint64 { return n.log.lastIndex() }
+func (n *Node) lastLogTerm() Term    { return n.log.lastTerm() }

@@ -70,27 +70,49 @@ func (t MessageType) MarshalText() ([]byte, error) { return []byte(t.String()), 
 //
 // The fields map to the RPC arguments and results in Figure 2:
 //
-//	RequestVote          Term, From (candidateId), LastLogIndex, LastLogTerm
-//	RequestVoteResponse  Term, VoteGranted
-//	AppendEntries        Term, From (leaderId)        (log fields arrive in M3)
-//	AppendEntriesResp    Term, Success
+//	RequestVote            Term, From (candidateId), LastLogIndex, LastLogTerm
+//	RequestVoteResponse    Term, VoteGranted
+//	AppendEntries          Term, From (leaderId), PrevLogIndex, PrevLogTerm,
+//	                       Entries, LeaderCommit
+//	AppendEntriesResponse  Term, Success, and either MatchIndex (on success)
+//	                       or ConflictTerm and ConflictIndex (on failure)
 type Message struct {
 	Type MessageType `json:"type"`
 	From NodeID      `json:"from"`
 	To   NodeID      `json:"to"`
 	Term Term        `json:"term"`
 
+	// RequestVote
 	LastLogIndex uint64 `json:"last_log_index,omitempty"`
 	LastLogTerm  Term   `json:"last_log_term,omitempty"`
 	VoteGranted  bool   `json:"vote_granted,omitempty"`
-	Success      bool   `json:"success,omitempty"`
+
+	// AppendEntries
+	PrevLogIndex uint64  `json:"prev_log_index,omitempty"`
+	PrevLogTerm  Term    `json:"prev_log_term,omitempty"`
+	Entries      []Entry `json:"entries,omitempty"`
+	LeaderCommit uint64  `json:"leader_commit,omitempty"`
+
+	// AppendEntriesResponse
+	Success bool `json:"success,omitempty"`
+	// MatchIndex is the index of the last entry the follower now knows
+	// matches the leader's log: PrevLogIndex + len(Entries) of the request.
+	// Replying with it, rather than the leader working it out, keeps
+	// responses correct even when requests are duplicated or reordered.
+	MatchIndex uint64 `json:"match_index,omitempty"`
+	// ConflictTerm and ConflictIndex are the fast-backtracking hint on
+	// failure (§5.3): the term of the follower's entry at PrevLogIndex and
+	// the first index it has for that term, or ConflictTerm 0 and
+	// ConflictIndex = its last index + 1 if its log is too short.
+	ConflictTerm  Term   `json:"conflict_term,omitempty"`
+	ConflictIndex uint64 `json:"conflict_index,omitempty"`
 }
 
-// HardState is the state Figure 2 calls "persistent state on all servers"
-// (apart from the log, which arrives in M3). It must be on stable storage
-// before the node sends any message that depends on it: a node that votes,
-// replies, crashes and forgets its vote could vote again in the same term
-// and help elect a second leader.
+// HardState is the part of Figure 2's "persistent state on all servers"
+// other than the log. It must be on stable storage before the node sends
+// any message that depends on it: a node that votes, replies, crashes and
+// forgets its vote could vote again in the same term and help elect a
+// second leader.
 type HardState struct {
 	Term Term   `json:"term"` // currentTerm
 	Vote NodeID `json:"vote"` // votedFor in Term, or None
@@ -98,14 +120,27 @@ type HardState struct {
 
 // Ready is the work a node hands back to its caller. The caller must:
 //
-//  1. persist HardState, if it is non-nil, and wait for that to finish
+//  1. persist HardState (if non-nil) and Entries, and wait for that to finish
 //  2. only then send Messages
-//  3. call Advance
+//  3. apply CommittedEntries to the state machine, in order
+//  4. call Advance
 //
-// The order matters for the reason given on HardState.
+// Persisting before sending is what lets a reply mean what it says: "I
+// voted for you" or "I have these entries" must survive a crash.
 type Ready struct {
 	HardState *HardState // nil if unchanged since the last Ready
-	Messages  []Message
+
+	// Entries must be written to stable storage. If the first one has an
+	// index the storage already holds, everything from that index on is
+	// replaced: the log was truncated after a conflict with the leader.
+	Entries []Entry
+
+	Messages []Message
+
+	// CommittedEntries are committed and not yet applied. They are always
+	// already durable on this node (they were in an earlier Ready, or in
+	// Entries of this one).
+	CommittedEntries []Entry
 }
 
 // Status is a read-only snapshot of a node, for tests, invariants, the
@@ -116,6 +151,10 @@ type Status struct {
 	Term   Term   `json:"term"`
 	Vote   NodeID `json:"vote"`
 	Leader NodeID `json:"leader"` // the leader of Term as far as this node knows, or None
+
+	LastIndex uint64 `json:"last_index"`
+	LastTerm  Term   `json:"last_term"`
+	Commit    uint64 `json:"commit"` // commitIndex
 }
 
 // Rand is the randomness a node needs: picking election timeouts. It is
