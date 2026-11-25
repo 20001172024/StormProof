@@ -5,8 +5,16 @@ import (
 	"slices"
 )
 
-// ErrNotLeader is returned by Propose on a node that is not the leader.
+// ErrNotLeader is returned by Propose and ReadIndex on a node that is not
+// the leader.
 var ErrNotLeader = errors.New("raft: not the leader")
+
+// ErrReadNotReady is returned by ReadIndex on a new leader that has not yet
+// committed an entry in its own term. Until it has, its commit index may be
+// behind entries that an earlier leader already committed, so it can't
+// promise a read index. The no-op appended on election clears this within
+// one round trip.
+var ErrReadNotReady = errors.New("raft: leader has not committed an entry in its term yet")
 
 // Config configures a node.
 type Config struct {
@@ -50,6 +58,11 @@ type TestingKnobs struct {
 	// its term. The no-op is what normally lets entries from earlier terms
 	// commit promptly; without it they wait for the next client command.
 	NoNoopOnElection bool
+	// ReadIndexWithoutQuorum confirms ReadIndex requests straight away
+	// instead of waiting for a majority to acknowledge this node as leader.
+	// A leader that has been replaced without knowing it then serves stale
+	// reads.
+	ReadIndexWithoutQuorum bool
 }
 
 func (c Config) validate() error {
@@ -111,6 +124,14 @@ type Node struct {
 	nextIndex  map[NodeID]uint64 // next entry to send to each follower
 	matchIndex map[NodeID]uint64 // highest entry known to be replicated on each follower
 
+	// ReadIndex (dissertation §6.4). readSeq numbers each read; heartbeats
+	// carry the latest number as their Context. pendingReads wait for a
+	// majority to acknowledge a heartbeat sent after they began; readStates
+	// are confirmed and wait for the caller.
+	readSeq      uint64
+	pendingReads []pendingRead
+	readStates   []ReadState
+
 	// Timers, counted in ticks.
 	electionElapsed  int
 	electionTimeout  int // randomized, see resetElectionTimer
@@ -123,6 +144,12 @@ type Node struct {
 	unstable    uint64    // first log index not yet handed out in Ready.Entries
 	readyStable uint64    // value of unstable once the pending Ready is advanced
 	readyApply  uint64    // value of applied once the pending Ready is advanced
+}
+
+type pendingRead struct {
+	ReadState
+	seq  uint64
+	acks map[NodeID]bool // only its size is used
 }
 
 // NewNode creates a node as a follower, from its recovered state.
@@ -183,6 +210,58 @@ func (n *Node) Propose(data []byte) (uint64, error) {
 	return e.Index, nil
 }
 
+// ReadIndex starts a linearizable read (dissertation §6.4). The read is
+// confirmed in a later Ready.ReadStates, with the caller's id, once a
+// majority has acknowledged this node as leader after the call. The caller
+// then waits until it has applied up to ReadState.Index and serves the read
+// from its state machine.
+//
+// Why each step is needed:
+//   - Recording the commit index now: every write that completed before
+//     the read started is committed, so is at or below this index.
+//   - Confirming leadership afterwards: a leader cut off by a partition
+//     may have been replaced, and the new leader may have committed writes
+//     this node has never heard of. A majority still accepting it as
+//     leader rules that out.
+//   - Waiting to apply up to the index: the local state machine must
+//     include every write the read has to see.
+func (n *Node) ReadIndex(id uint64) error {
+	if n.role != Leader {
+		return ErrNotLeader
+	}
+	if t, _ := n.log.term(n.commitIndex); t != n.term {
+		return ErrReadNotReady
+	}
+	rs := ReadState{ID: id, Index: n.commitIndex}
+	if n.quorum() == 1 || n.cfg.Knobs.ReadIndexWithoutQuorum {
+		n.readStates = append(n.readStates, rs)
+		return nil
+	}
+	n.readSeq++
+	n.pendingReads = append(n.pendingReads, pendingRead{
+		ReadState: rs, seq: n.readSeq, acks: map[NodeID]bool{n.id: true},
+	})
+	n.broadcastAppend() // ask for acknowledgements now, rather than at the next heartbeat
+	return nil
+}
+
+// ackRead records that a follower acknowledged this node as leader in a
+// response to a heartbeat with Context ctx. That confirms every read that
+// began before that heartbeat was sent (seq <= ctx). Reads are confirmed in
+// order: an earlier read always has at least the acknowledgements a later
+// one has.
+func (n *Node) ackRead(from NodeID, ctx uint64) {
+	for _, p := range n.pendingReads {
+		if p.seq <= ctx {
+			p.acks[from] = true
+		}
+	}
+	for len(n.pendingReads) > 0 && len(n.pendingReads[0].acks) >= n.quorum() {
+		n.readStates = append(n.readStates, n.pendingReads[0].ReadState)
+		n.pendingReads = n.pendingReads[1:]
+	}
+}
+
 // Step processes one incoming message.
 func (n *Node) Step(m Message) {
 	// Figure 2, All Servers: "If RPC request or response contains term
@@ -220,6 +299,7 @@ func (n *Node) Ready() Ready {
 	rd.Entries = n.log.slice(n.unstable, n.log.lastIndex()+1)
 	rd.Messages = n.msgs
 	rd.CommittedEntries = n.log.slice(n.applied+1, n.commitIndex+1)
+	rd.ReadStates = n.readStates
 
 	n.readyHard = hs
 	n.readyStable = n.log.lastIndex() + 1
@@ -233,6 +313,7 @@ func (n *Node) Advance() {
 	n.unstable = n.readyStable
 	n.applied = n.readyApply
 	n.msgs = nil
+	n.readStates = nil
 }
 
 // Status returns a snapshot of the node's state.
@@ -259,6 +340,10 @@ func (n *Node) becomeFollower(term Term, leader NodeID) {
 	n.leader = leader
 	n.votes = nil
 	n.nextIndex, n.matchIndex = nil, nil
+	// Reads still waiting for confirmation can't be confirmed any more: the
+	// caller sees this node is no longer leader and has them retried.
+	// Already confirmed ones (readStates) stay valid.
+	n.pendingReads = nil
 	n.resetElectionTimer()
 }
 

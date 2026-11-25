@@ -27,6 +27,7 @@ func (n *Node) sendAppend(to NodeID) {
 		PrevLogTerm:  prevTerm,
 		Entries:      n.log.slice(next, next+uint64(n.cfg.MaxEntriesPerMsg)),
 		LeaderCommit: n.commitIndex,
+		Context:      n.readSeq,
 	})
 }
 
@@ -55,7 +56,7 @@ func (n *Node) handleAppendEntries(m Message) {
 	if m.PrevLogIndex > n.log.lastIndex() {
 		// Our log is too short: tell the leader where it ends.
 		n.send(Message{Type: MsgAppResp, To: m.From, Success: false,
-			ConflictIndex: n.log.lastIndex() + 1})
+			ConflictIndex: n.log.lastIndex() + 1, Context: m.Context})
 		return
 	}
 	if t, _ := n.log.term(m.PrevLogIndex); t != m.PrevLogTerm {
@@ -63,7 +64,7 @@ func (n *Node) handleAppendEntries(m Message) {
 		// at the start of that term: if it lacks the term entirely, everything
 		// from there on has to be replaced.
 		n.send(Message{Type: MsgAppResp, To: m.From, Success: false,
-			ConflictTerm: t, ConflictIndex: n.log.firstIndexOfTerm(m.PrevLogIndex)})
+			ConflictTerm: t, ConflictIndex: n.log.firstIndexOfTerm(m.PrevLogIndex), Context: m.Context})
 		return
 	}
 
@@ -98,7 +99,7 @@ func (n *Node) handleAppendEntries(m Message) {
 		n.commitIndex = c
 	}
 
-	n.send(Message{Type: MsgAppResp, To: m.From, Success: true, MatchIndex: lastNew})
+	n.send(Message{Type: MsgAppResp, To: m.From, Success: true, MatchIndex: lastNew, Context: m.Context})
 }
 
 // handleAppendResponse updates the leader's view of a follower.
@@ -109,6 +110,13 @@ func (n *Node) handleAppendResponse(m Message) {
 		return
 	}
 	from := m.From
+
+	// Any response in our term, success or not, shows the follower still
+	// accepts us as leader: it would have answered with a higher term
+	// otherwise. That is what ReadIndex needs.
+	if m.Context > 0 {
+		n.ackRead(from, m.Context)
+	}
 
 	if m.Success {
 		// Figure 2, Leaders: "If successful: update nextIndex and matchIndex

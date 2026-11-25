@@ -106,6 +106,12 @@ type Message struct {
 	// ConflictIndex = its last index + 1 if its log is too short.
 	ConflictTerm  Term   `json:"conflict_term,omitempty"`
 	ConflictIndex uint64 `json:"conflict_index,omitempty"`
+
+	// Context is carried by AppendEntries and echoed back in its response.
+	// It is the leader's latest ReadIndex sequence number, so a response
+	// proves the follower still accepted this node as leader after that
+	// read began (dissertation §6.4).
+	Context uint64 `json:"context,omitempty"`
 }
 
 // HardState is the part of Figure 2's "persistent state on all servers"
@@ -141,6 +147,19 @@ type Ready struct {
 	// already durable on this node (they were in an earlier Ready, or in
 	// Entries of this one).
 	CommittedEntries []Entry
+
+	// ReadStates are ReadIndex requests whose leadership check has passed.
+	// Each may be answered from the local state machine once every entry up
+	// to its Index has been applied.
+	ReadStates []ReadState
+}
+
+// ReadState is a confirmed ReadIndex request: the caller's ID for it, and
+// the commit index that the state machine must reach before the read is
+// served.
+type ReadState struct {
+	ID    uint64 `json:"id"`
+	Index uint64 `json:"index"`
 }
 
 // Status is a read-only snapshot of a node, for tests, invariants, the
