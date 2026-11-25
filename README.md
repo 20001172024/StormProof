@@ -8,9 +8,9 @@ crashes, partitions, message loss and disk faults, and a **time-travel
 visualizer** for replaying failures step by step.
 
 > **Status:** early development. Done: project setup (M0), the simulator
-> foundation (M1), Raft leader election (M2) and log replication (M3).
-> Persistence with a write-ahead log (M4) is next. The KV store and gRPC
-> API are not usable yet.
+> foundation (M1), Raft leader election (M2), log replication (M3) and a
+> crash-safe write-ahead log (M4). The KV store with linearizable reads (M5)
+> is next. The gRPC API is not usable yet.
 
 ## Why it's built this way
 
@@ -26,7 +26,7 @@ replayed exactly. See [docs/design.md](docs/design.md).
 |---|---|
 | `raft/` | Deterministic Raft state machine (no I/O) |
 | `kv/` | Key-value state machine, client sessions, dedup |
-| `storage/` | Write-ahead log and snapshot files |
+| `storage/` | File-system interface (real and simulated) and the write-ahead log (`storage/wal`) |
 | `transport/` | gRPC transport between nodes |
 | `server/` | Node binary wiring everything together |
 | `client/` | Go client library and CLI |

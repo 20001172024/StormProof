@@ -164,7 +164,9 @@ func TestLostVoteCausesTwoLeaders(t *testing.T) {
 	}
 }
 
-func TestHardStateRoundTrip(t *testing.T) {
+// State saved through the WAL, including a truncation, comes back after a
+// machine crash.
+func TestRecoveryThroughWAL(t *testing.T) {
 	disk := sim.NewDisk(sim.DiskConfig{}, sim.NewRand(1, "disk"))
 	env := sim.Env{ID: 1, Peers: []sim.NodeID{2, 3}, Disk: disk, Rand: sim.NewRand(1, "node"), Now: func() sim.Time { return 0 }}
 	p, err := open(env, DefaultOptions)
@@ -173,11 +175,11 @@ func TestHardStateRoundTrip(t *testing.T) {
 	}
 	hs := raft.HardState{Term: 7, Vote: 3}
 	es := []raft.Entry{{Index: 1, Term: 2}, {Index: 2, Term: 7, Data: []byte("x")}, {Index: 3, Term: 7, Data: []byte("y")}}
-	if err := p.save(raft.Ready{HardState: &hs, Entries: es}); err != nil {
+	if err := p.wal.Save(&hs, es); err != nil {
 		t.Fatal(err)
 	}
 	// Replace the tail from index 2, as after a conflict with a new leader.
-	if err := p.save(raft.Ready{Entries: []raft.Entry{{Index: 2, Term: 8, Data: []byte("z")}}}); err != nil {
+	if err := p.wal.Save(nil, []raft.Entry{{Index: 2, Term: 8, Data: []byte("z")}}); err != nil {
 		t.Fatal(err)
 	}
 	disk.Crash(true)
@@ -195,13 +197,19 @@ func TestHardStateRoundTrip(t *testing.T) {
 	}
 }
 
-func TestCorruptHardStateRefusesToStart(t *testing.T) {
+// A node whose WAL is corrupt refuses to start, which the simulator reports
+// as a recovery violation.
+func TestCorruptWALRefusesToStart(t *testing.T) {
 	disk := sim.NewDisk(sim.DiskConfig{}, sim.NewRand(1, "disk"))
-	f, _ := disk.Create(stateFile)
-	_, _ = f.Write([]byte{1, 2, 3})
+	// A complete record (length 17, so the bytes are all there) whose
+	// checksum is wrong.
+	f, _ := disk.Create("wal-0000000000000001.log")
+	_, _ = f.Write(append([]byte{17, 0, 0, 0, 0xde, 0xad, 0xbe, 0xef, 1}, make([]byte, 16)...))
+	_ = f.Sync()
+	_ = disk.SyncDir()
 	env := sim.Env{ID: 1, Peers: []sim.NodeID{2}, Disk: disk, Rand: sim.NewRand(1, "node")}
 	if _, err := open(env, DefaultOptions); err == nil {
-		t.Fatal("started from a 3-byte state file")
+		t.Fatal("started from a corrupt WAL")
 	}
 }
 

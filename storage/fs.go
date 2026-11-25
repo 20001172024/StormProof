@@ -25,10 +25,16 @@ type FS interface {
 	Remove(name string) error
 	// List returns all file names, sorted.
 	List() ([]string, error)
+	// SyncDir makes the directory itself durable: which files exist and
+	// under which names. Creating, renaming or removing a file is not
+	// guaranteed to survive a crash until SyncDir returns nil, just as file
+	// contents aren't until File.Sync does.
+	SyncDir() error
 }
 
 // File is an open file. Data written is not durable until Sync returns
-// nil: a crash may lose any of it, or keep only part of it.
+// nil: a crash may lose any of it, or keep only part of it. A new file's
+// name is not durable until FS.SyncDir.
 type File interface {
 	io.Writer
 	Sync() error

@@ -28,19 +28,24 @@ type DiskConfig struct {
 // Disk is an in-memory implementation of storage.FS that models what
 // survives a crash.
 //
-// Each file remembers how many of its bytes are durable (synced). Writes go
-// to the in-memory view straight away, like an OS page cache, but only Sync
-// makes them durable. Metadata operations (create, rename, remove) are
-// durable immediately; this is a simplification, since real file systems
-// also need the directory to be fsynced. It is noted in docs/design.md and
-// may be tightened in M4.
+// Data: each file remembers how many of its bytes are durable (synced).
+// Writes go to the in-memory view straight away, like an OS page cache, but
+// only File.Sync makes them durable.
+//
+// Names: the directory is modelled the same way. files is the current view
+// and durable is the directory as of the last SyncDir. A machine crash
+// reverts to durable, so a file created, renamed or removed since then may
+// be back where it was. Truncating an existing file with Create happens in
+// place, as it does on a real file system: the file keeps its name, and its
+// old contents are gone even if the crash comes before any Sync.
 type Disk struct {
-	cfg   DiskConfig
-	rng   *Rand
-	files map[string]*memFile
-	gen   int  // incremented on every crash, to invalidate old handles
-	delay Time // slow-sync delay accumulated since the last takeDelay
-	calm  bool // set by StopFaults: no more injected failures or slowness
+	cfg     DiskConfig
+	rng     *Rand
+	files   map[string]*memFile
+	durable map[string]*memFile
+	gen     int  // incremented on every crash, to invalidate old handles
+	delay   Time // slow-sync delay accumulated since the last takeDelay
+	calm    bool // set by StopFaults: no more injected failures or slowness
 }
 
 type memFile struct {
@@ -52,7 +57,7 @@ var _ storage.FS = (*Disk)(nil) // compile-time check that Disk implements FS
 
 // NewDisk returns an empty disk. rng drives its faults.
 func NewDisk(cfg DiskConfig, rng *Rand) *Disk {
-	return &Disk{cfg: cfg, rng: rng, files: make(map[string]*memFile)}
+	return &Disk{cfg: cfg, rng: rng, files: map[string]*memFile{}, durable: map[string]*memFile{}}
 }
 
 func notExist(op, name string) error {
@@ -61,8 +66,13 @@ func notExist(op, name string) error {
 
 // Create implements storage.FS.
 func (d *Disk) Create(name string) (storage.File, error) {
-	f := &memFile{}
-	d.files[name] = f
+	f, ok := d.files[name]
+	if ok {
+		f.data, f.synced = nil, 0 // truncate in place
+	} else {
+		f = &memFile{}
+		d.files[name] = f
+	}
 	return &memHandle{disk: d, file: f, gen: d.gen}, nil
 }
 
@@ -106,6 +116,15 @@ func (d *Disk) Remove(name string) error {
 	return nil
 }
 
+// SyncDir implements storage.FS.
+func (d *Disk) SyncDir() error {
+	d.durable = make(map[string]*memFile, len(d.files))
+	for name, f := range d.files {
+		d.durable[name] = f
+	}
+	return nil
+}
+
 // List implements storage.FS.
 func (d *Disk) List() ([]string, error) {
 	return d.sortedNames(), nil
@@ -128,13 +147,20 @@ func (d *Disk) sortedNames() []string {
 //
 // If loseUnsynced is false (the process died but the machine kept running,
 // like kill -9), the OS still writes out everything in its page cache, so
-// nothing is lost. If it is true (power loss or kernel crash), each file
-// keeps its durable bytes plus a random-length prefix of the bytes written
-// after them: anywhere from none of them (lost) to all of them (lucky),
-// with partial writes (torn) in between.
+// nothing is lost. If it is true (power loss or kernel crash), the
+// directory reverts to its last SyncDir, and each file keeps its durable
+// bytes plus a random-length prefix of the bytes written after them:
+// anywhere from none of them (lost) to all of them (lucky), with partial
+// writes (torn) in between.
 func (d *Disk) Crash(loseUnsynced bool) {
 	d.gen++
 	d.delay = 0
+	if loseUnsynced {
+		d.files = make(map[string]*memFile, len(d.durable))
+		for name, f := range d.durable {
+			d.files[name] = f
+		}
+	}
 	for _, name := range d.sortedNames() {
 		f := d.files[name]
 		if loseUnsynced {
@@ -143,6 +169,12 @@ func (d *Disk) Crash(loseUnsynced bool) {
 			f.data = f.data[:f.synced+keep]
 		}
 		f.synced = len(f.data) // whatever survived is now on disk
+	}
+	if loseUnsynced {
+		d.durable = make(map[string]*memFile, len(d.files))
+		for name, f := range d.files {
+			d.durable[name] = f
+		}
 	}
 }
 

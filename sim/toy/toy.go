@@ -127,7 +127,7 @@ func (n *Node) Step(m sim.Message) ([]sim.Message, error) {
 }
 
 // save durably replaces the state file with v: write a temp file, fsync it,
-// then rename it over the real file. Rename replaces the file atomically, so
+// rename it over the real file, then fsync the directory. Rename replaces the file atomically, so
 // after a crash the state file holds either the old value or the new one,
 // but only if the data was fsynced before the rename.
 func (n *Node) save(v uint64) error {
@@ -150,7 +150,14 @@ func (n *Node) save(v uint64) error {
 	if err := f.Close(); err != nil {
 		return err
 	}
-	return n.env.Disk.Rename(tempFile, stateFile)
+	if err := n.env.Disk.Rename(tempFile, stateFile); err != nil {
+		return err
+	}
+	// The rename itself is only durable once the directory is synced.
+	if n.buggy {
+		return nil
+	}
+	return n.env.Disk.SyncDir()
 }
 
 // Monotonic returns the invariant that no node's counter ever decreases,
