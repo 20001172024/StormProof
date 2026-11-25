@@ -1,0 +1,23 @@
+# Build output
+/bin/
+/dist/
+
+# Go test and coverage output
+*.test
+*.out
+coverage.*
+
+# Simulator traces written locally (example traces are committed elsewhere)
+/traces/
+
+# Editors and OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Terraform state and secrets (M11)
+*.tfstate
+*.tfstate.*
+.terraform/
+*.tfvars
