@@ -1,0 +1,44 @@
+version: "2"
+
+linters:
+  enable:
+    - depguard
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - misspell
+  settings:
+    depguard:
+      rules:
+        # Determinism guard (docs/design.md, "Sources of non-determinism").
+        # The Raft state machine must not reach the outside world directly:
+        # time, randomness, I/O and concurrency all come in through the
+        # caller. Test files are exempt so tests can use helpers freely.
+        raft-is-pure:
+          files:
+            - "**/raft/*.go"
+            - "!$test"
+          deny:
+            - pkg: time
+              desc: "raft is driven by Tick(), not wall-clock time"
+            - pkg: math/rand
+              desc: "inject randomness from the caller so runs replay from a seed"
+            - pkg: math/rand/v2
+              desc: "inject randomness from the caller so runs replay from a seed"
+            - pkg: crypto/rand
+              desc: "inject randomness from the caller so runs replay from a seed"
+            - pkg: os
+              desc: "raft does no I/O; return entries in Ready for the caller to persist"
+            - pkg: net
+              desc: "raft does no I/O; return messages in Ready for the caller to send"
+            - pkg: sync
+              desc: "raft is single-threaded; the caller serializes calls"
+            - pkg: google.golang.org/grpc
+              desc: "transport belongs in package transport"
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
