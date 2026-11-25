@@ -37,6 +37,9 @@ type Env struct {
 	Peers []NodeID // every other node, sorted
 	Disk  storage.FS
 	Rand  *Rand // a fresh stream for each incarnation of the node
+	// Now returns the current virtual time. It is for test workloads and
+	// harness code; the system under test should be driven by Tick only.
+	Now func() Time
 }
 
 // ProcessFactory starts a process, recovering any state from env.Disk.
@@ -73,9 +76,10 @@ type Config struct {
 	// Trace receives the JSON Lines trace. Nil means no trace.
 	Trace io.Writer
 
-	// Quiet stops new crashes and partitions for the final Quiet of the
-	// run, so the cluster gets a chance to recover. Partitions and downtime
-	// already scheduled still run their course, and message loss continues.
+	// Quiet stops injected faults for the final Quiet of the run, so the
+	// cluster gets a chance to recover: no new crashes or partitions, and no
+	// more fsync failures or slow disks. Partitions and downtime already
+	// scheduled still run their course, and message loss and delay continue.
 	Quiet Time
 	// FinalCheck, if set, runs once when the run ends without a violation.
 	// It is for liveness properties ("a leader was elected"), which can't be
@@ -134,6 +138,7 @@ type simulation struct {
 	faults     *Rand
 	clock      *Rand
 	partition  map[Link]bool // links currently blocked
+	quiet      bool          // the quiet period has started
 	invariants []Invariant
 	trace      *traceWriter
 	res        Result
@@ -180,6 +185,9 @@ func Run(cfg Config) (Result, error) {
 	}
 	if cfg.Profile.Faults.Interval > 0 {
 		s.q.push(&event{at: cfg.Profile.Faults.Interval, kind: evFaultCheck})
+	}
+	if cfg.Quiet > 0 {
+		s.q.push(&event{at: cfg.Duration - cfg.Quiet, kind: evQuiet})
 	}
 
 	for s.q.len() > 0 && s.res.Violation == nil && s.err == nil {
@@ -236,7 +244,10 @@ func (s *simulation) handle(e *event) {
 		if n.proc == nil || n.incarnation != e.incarnation {
 			return // the node crashed (and maybe restarted) since this was scheduled
 		}
-		msgs, err := n.proc.Tick()
+		msgs, err := s.call(n, n.proc.Tick)
+		if s.res.Violation != nil {
+			return // it panicked
+		}
 		s.afterCall(n, msgs, err)
 		if n.proc != nil && n.incarnation == e.incarnation {
 			s.q.push(&event{at: s.now + n.tickInterval, kind: evTick, node: n.id, incarnation: n.incarnation})
@@ -255,6 +266,13 @@ func (s *simulation) handle(e *event) {
 	case evHeal:
 		s.partition = map[Link]bool{}
 		s.trace.write(Record{Step: s.step, T: s.now, Type: RecHeal})
+
+	case evQuiet:
+		s.quiet = true
+		for _, n := range s.nodes {
+			n.disk.StopFaults()
+		}
+		s.trace.write(Record{Step: s.step, T: s.now, Type: RecQuiet})
 	}
 }
 
@@ -275,6 +293,7 @@ func (s *simulation) start(n *node) {
 		Peers: peers,
 		Disk:  n.disk,
 		Rand:  NewRand(s.cfg.Seed, fmt.Sprintf("node/%d/%d", n.id, n.incarnation)),
+		Now:   func() Time { return s.now },
 	})
 	if err != nil {
 		s.violate("recovery", fmt.Sprintf("node %d failed to start: %v", n.id, err))
@@ -301,6 +320,19 @@ func (s *simulation) crash(n *node, machine bool, reason string) {
 	s.trace.write(Record{Step: s.step, T: s.now, Type: RecCrash, Node: n.id, Kind: kind, Reason: reason})
 	f := s.cfg.Profile.Faults
 	s.q.push(&event{at: s.now + s.faults.Between(f.MinDowntime, f.MaxDowntime+1), kind: evRestart, node: n.id})
+}
+
+// call runs one call into a process. A panic in the system under test is a
+// bug the simulator found, so it is recorded as a violation (named
+// "panic") instead of killing the whole sweep, and the seed replays it like
+// any other.
+func (s *simulation) call(n *node, f func() ([]Message, error)) (msgs []Message, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			s.violate("panic", fmt.Sprintf("node %d panicked: %v", n.id, r))
+		}
+	}()
+	return f()
 }
 
 // afterCall handles the result of calling into a process.
@@ -357,14 +389,17 @@ func (s *simulation) deliver(m Message) {
 	}
 	s.res.Stats.Delivered++
 	s.trace.write(Record{Step: s.step, T: s.now, Type: RecDeliver, From: m.From, To: m.To, Kind: m.Body.Kind()})
-	msgs, err := n.proc.Step(m)
+	msgs, err := s.call(n, func() ([]Message, error) { return n.proc.Step(m) })
+	if s.res.Violation != nil {
+		return // it panicked
+	}
 	s.afterCall(n, msgs, err)
 }
 
 // rollFaults is called every Faults.Interval to maybe crash a node and maybe
 // start a partition.
 func (s *simulation) rollFaults() {
-	if s.now > s.cfg.Duration-s.cfg.Quiet {
+	if s.quiet {
 		return
 	}
 	f := s.cfg.Profile.Faults
