@@ -15,8 +15,12 @@ func TestSweep(t *testing.T) {
 		wantCode int
 		wantOut  string
 	}{
-		{"correct node passes", []string{"-seeds", "20", "-profile", "all"}, exitOK, "20 seeds (1 to 20), 0 failed"},
-		{"planted bug fails", []string{"-seeds", "20", "-profile", "crashes", "-buggy"}, exitViolation, "counter-monotonic"},
+		{"raft passes", []string{"-seeds", "20", "-profile", "all"}, exitOK, "20 seeds (1 to 20), 0 failed"},
+		{"raft planted bug fails", []string{"-seeds", "20", "-profile", "crashes", "-buggy"}, exitViolation, "term-monotonic"},
+		{"toy passes", []string{"-node", "toy", "-seeds", "20", "-profile", "all"}, exitOK, "0 failed"},
+		{"toy planted bug fails", []string{"-node", "toy", "-seeds", "20", "-profile", "crashes", "-buggy"}, exitViolation, "counter-monotonic"},
+		{"unknown node", []string{"-node", "paxos"}, exitError, ""},
+		{"quiet longer than run", []string{"-duration", "1s", "-quiet", "2s"}, exitError, ""},
 		{"unknown profile", []string{"-profile", "nope"}, exitError, ""},
 		{"stray argument", []string{"extra"}, exitError, ""},
 	}

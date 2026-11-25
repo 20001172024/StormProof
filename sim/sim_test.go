@@ -231,11 +231,12 @@ func TestRunInjectsFaults(t *testing.T) {
 
 func TestRunValidatesConfig(t *testing.T) {
 	cases := map[string]func(*Config){
-		"one node":      func(c *Config) { c.Nodes = 1 },
-		"no tick":       func(c *Config) { c.TickInterval = 0 },
-		"no duration":   func(c *Config) { c.Duration = 0 },
-		"no process":    func(c *Config) { c.NewProcess = nil },
-		"skew too high": func(c *Config) { c.Profile.ClockSkew = 1 },
+		"one node":       func(c *Config) { c.Nodes = 1 },
+		"no tick":        func(c *Config) { c.TickInterval = 0 },
+		"no duration":    func(c *Config) { c.Duration = 0 },
+		"no process":     func(c *Config) { c.NewProcess = nil },
+		"skew too high":  func(c *Config) { c.Profile.ClockSkew = 1 },
+		"quiet too long": func(c *Config) { c.Quiet = c.Duration + 1 },
 	}
 	for name, mutate := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -245,5 +246,43 @@ func TestRunValidatesConfig(t *testing.T) {
 				t.Fatal("Run accepted an invalid config")
 			}
 		})
+	}
+}
+
+// With a quiet period, no fault starts in the final stretch of the run.
+func TestRunQuietPeriod(t *testing.T) {
+	var buf bytes.Buffer
+	cfg := pingConfig("chaos")
+	cfg.Duration = 20 * Second
+	cfg.Quiet = 10 * Second
+	cfg.Trace = &buf
+	if _, err := Run(cfg); err != nil {
+		t.Fatal(err)
+	}
+	_, recs := readTrace(t, buf.Bytes())
+	for _, r := range recs {
+		injected := r.Type == RecCrash && r.Reason == "injected"
+		if (injected || r.Type == RecPartition) && r.T > cfg.Duration-cfg.Quiet {
+			t.Fatalf("fault during the quiet period: %+v", r)
+		}
+	}
+}
+
+func TestRunFinalCheck(t *testing.T) {
+	cfg := pingConfig("calm")
+	calls := 0
+	cfg.FinalCheck = func(nodes []NodeView) error {
+		calls++
+		if len(nodes) != 3 {
+			t.Errorf("FinalCheck got %d nodes", len(nodes))
+		}
+		return errors.New("no leader")
+	}
+	res, err := Run(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 || res.Violation == nil || res.Violation.Invariant != "final-check" {
+		t.Fatalf("calls=%d violation=%v, want one call reported as final-check", calls, res.Violation)
 	}
 }
