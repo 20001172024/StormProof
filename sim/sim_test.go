@@ -260,11 +260,15 @@ func TestRunQuietPeriod(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, recs := readTrace(t, buf.Bytes())
+	sawQuiet := false
 	for _, r := range recs {
-		injected := r.Type == RecCrash && r.Reason == "injected"
-		if (injected || r.Type == RecPartition) && r.T > cfg.Duration-cfg.Quiet {
+		sawQuiet = sawQuiet || r.Type == RecQuiet
+		if (r.Type == RecCrash || r.Type == RecPartition) && r.T >= cfg.Duration-cfg.Quiet {
 			t.Fatalf("fault during the quiet period: %+v", r)
 		}
+	}
+	if !sawQuiet {
+		t.Fatal("no quiet record in the trace")
 	}
 }
 
@@ -284,5 +288,21 @@ func TestRunFinalCheck(t *testing.T) {
 	}
 	if calls != 1 || res.Violation == nil || res.Violation.Invariant != "final-check" {
 		t.Fatalf("calls=%d violation=%v, want one call reported as final-check", calls, res.Violation)
+	}
+}
+
+type panicky struct{ ping }
+
+func (p *panicky) Tick() ([]Message, error) { panic("boom") }
+
+func TestRunReportsPanicAsViolation(t *testing.T) {
+	cfg := pingConfig("calm")
+	cfg.NewProcess = func(env Env) (Process, error) { return &panicky{ping{env: env}}, nil }
+	res, err := Run(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Violation == nil || res.Violation.Invariant != "panic" || !strings.Contains(res.Violation.Detail, "boom") {
+		t.Fatalf("Violation = %v, want a panic violation mentioning boom", res.Violation)
 	}
 }

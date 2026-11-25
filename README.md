@@ -8,8 +8,9 @@ crashes, partitions, message loss and disk faults, and a **time-travel
 visualizer** for replaying failures step by step.
 
 > **Status:** early development. Done: project setup (M0), the simulator
-> foundation (M1) and Raft leader election (M2). Log replication (M3) is
-> next. The KV store and gRPC API are not usable yet.
+> foundation (M1), Raft leader election (M2) and log replication (M3).
+> Persistence with a write-ahead log (M4) is next. The KV store and gRPC
+> API are not usable yet.
 
 ## Why it's built this way
 

@@ -232,3 +232,17 @@ func TestDiskCrashIsDeterministic(t *testing.T) {
 		}
 	}
 }
+
+func TestDiskStopFaults(t *testing.T) {
+	d := newTestDisk(DiskConfig{SyncFailProb: 1, SlowSyncProb: 1, SlowSyncMax: Second})
+	f, _ := d.Create("a")
+	d.StopFaults()
+	for i := 0; i < 10; i++ {
+		if err := f.Sync(); err != nil {
+			t.Fatalf("Sync failed after StopFaults: %v", err)
+		}
+	}
+	if d.takeDelay() != 0 {
+		t.Fatal("slow syncs after StopFaults")
+	}
+}

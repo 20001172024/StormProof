@@ -40,6 +40,7 @@ type Disk struct {
 	files map[string]*memFile
 	gen   int  // incremented on every crash, to invalidate old handles
 	delay Time // slow-sync delay accumulated since the last takeDelay
+	calm  bool // set by StopFaults: no more injected failures or slowness
 }
 
 type memFile struct {
@@ -145,6 +146,10 @@ func (d *Disk) Crash(loseUnsynced bool) {
 	}
 }
 
+// StopFaults turns off fsync failures and slow syncs for the rest of the
+// run. The simulator calls it when the quiet period starts.
+func (d *Disk) StopFaults() { d.calm = true }
+
 // takeDelay returns the slow-sync delay accumulated since the last call
 // and resets it. The simulator adds it to the send time of the messages the
 // node produced, modelling a node that was stuck waiting on its disk.
@@ -184,11 +189,13 @@ func (h *memHandle) Sync() error {
 		return err
 	}
 	d := h.disk
-	if d.rng.Chance(d.cfg.SyncFailProb) {
-		return ErrSyncFailed
-	}
-	if d.rng.Chance(d.cfg.SlowSyncProb) {
-		d.delay += d.rng.Between(0, d.cfg.SlowSyncMax)
+	if !d.calm {
+		if d.rng.Chance(d.cfg.SyncFailProb) {
+			return ErrSyncFailed
+		}
+		if d.rng.Chance(d.cfg.SlowSyncProb) {
+			d.delay += d.rng.Between(0, d.cfg.SlowSyncMax)
+		}
 	}
 	h.file.synced = len(h.file.data)
 	return nil

@@ -19,6 +19,7 @@ const (
 	RecState     = "state"     // a node's traced state changed
 	RecPartition = "partition" // a network partition started
 	RecHeal      = "heal"      // the partition ended
+	RecQuiet     = "quiet"     // the quiet period started: no more injected faults
 	RecViolation = "violation" // an invariant failed; always the last record
 )
 

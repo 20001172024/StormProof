@@ -10,6 +10,7 @@ const (
 	evFaultCheck                      // the fault scheduler rolls the dice
 	evRestart                         // a crashed node comes back up
 	evHeal                            // the current partition ends
+	evQuiet                           // the quiet period starts
 )
 
 // event is one thing scheduled to happen at a point in virtual time.
