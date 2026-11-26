@@ -10,9 +10,10 @@ visualizer** for replaying failures step by step.
 > **Status:** early development. Done: project setup (M0), the simulator
 > foundation (M1), Raft leader election (M2), log replication (M3), a
 > crash-safe write-ahead log (M4), the KV store with sessions, ReadIndex
-> reads and Porcupine linearizability checking (M5), and snapshots with log
-> compaction (M6a), all in the simulator. Membership changes (M6b) are
-> next. Nothing runs outside the simulator yet: the gRPC server comes in M7.
+> reads and Porcupine linearizability checking (M5), snapshots with log
+> compaction (M6a) and single-server membership changes (M6b), all in the
+> simulator. Nothing runs outside the simulator yet: the gRPC server, real
+> mode, comes next in M7.
 
 ## Why it's built this way
 
@@ -53,7 +54,8 @@ Run the simulator:
 go run ./sim/cmd/stormproof-sim -seeds 1000 -profile all                     # sweep seeds: Raft + KV clients
 go run ./sim/cmd/stormproof-sim -seeds 300 -bug dedup -trace-dir traces/     # plant a bug, save failing traces
 go run ./sim/cmd/stormproof-sim -seed 7 -bug fsync -trace seed-7.jsonl       # replay one seed
-go run ./sim/cmd/stormproof-sim -node toy -seeds 1000                      # the toy counter used to test the simulator
+go run ./sim/cmd/stormproof-sim -seeds 1000 -membership                      # servers added and removed during the run
+go run ./sim/cmd/stormproof-sim -node toy -seeds 1000                        # the toy counter used to test the simulator
 ```
 
 ## License
