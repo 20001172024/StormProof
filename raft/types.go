@@ -44,6 +44,7 @@ const (
 	MsgVoteResp                        // reply to RequestVote
 	MsgApp                             // AppendEntries RPC (§5.3); in M2 only empty heartbeats
 	MsgAppResp                         // reply to AppendEntries
+	MsgSnap                            // InstallSnapshot RPC (§7); answered with MsgAppResp
 )
 
 func (t MessageType) String() string {
@@ -56,6 +57,8 @@ func (t MessageType) String() string {
 		return "AppendEntries"
 	case MsgAppResp:
 		return "AppendEntriesResponse"
+	case MsgSnap:
+		return "InstallSnapshot"
 	}
 	return "unknown"
 }
@@ -107,6 +110,9 @@ type Message struct {
 	ConflictTerm  Term   `json:"conflict_term,omitempty"`
 	ConflictIndex uint64 `json:"conflict_index,omitempty"`
 
+	// InstallSnapshot
+	Snapshot *Snapshot `json:"snapshot,omitempty"`
+
 	// Context is carried by AppendEntries and echoed back in its response.
 	// It is the leader's latest ReadIndex sequence number, so a response
 	// proves the follower still accepted this node as leader after that
@@ -148,10 +154,26 @@ type Ready struct {
 	// Entries of this one).
 	CommittedEntries []Entry
 
+	// Snapshot, if non-nil, came from the leader (InstallSnapshot) and
+	// replaces the state machine. The caller must persist it durably,
+	// together with the fact that the log now starts after it, before doing
+	// anything else with this Ready; then load it into the state machine
+	// before applying CommittedEntries, which follow on from it.
+	Snapshot *Snapshot
+
 	// ReadStates are ReadIndex requests whose leadership check has passed.
 	// Each may be answered from the local state machine once every entry up
 	// to its Index has been applied.
 	ReadStates []ReadState
+}
+
+// Snapshot is a compacted prefix of the log (§7): the state machine's
+// state after applying every entry up to Index, the term of that entry,
+// and the state itself, which only the application understands.
+type Snapshot struct {
+	Index uint64 `json:"index"`
+	Term  Term   `json:"term"`
+	Data  []byte `json:"data,omitempty"`
 }
 
 // ReadState is a confirmed ReadIndex request: the caller's ID for it, and
@@ -174,6 +196,11 @@ type Status struct {
 	LastIndex uint64 `json:"last_index"`
 	LastTerm  Term   `json:"last_term"`
 	Commit    uint64 `json:"commit"` // commitIndex
+
+	// SnapIndex and SnapTerm describe the latest snapshot: entries up to
+	// SnapIndex are no longer in the log. Both 0 without a snapshot.
+	SnapIndex uint64 `json:"snap_index,omitempty"`
+	SnapTerm  Term   `json:"snap_term,omitempty"`
 }
 
 // Rand is the randomness a node needs: picking election timeouts. It is

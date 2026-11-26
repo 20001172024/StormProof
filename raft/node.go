@@ -36,10 +36,13 @@ type Config struct {
 
 	Rand Rand
 
-	// HardState and Entries are the state recovered from storage after a
-	// restart; zero values for a brand new node. Entries must start at
-	// index 1 and be contiguous.
+	// HardState, Snapshot and Entries are the state recovered from storage
+	// after a restart; zero values for a brand new node. Entries must be
+	// contiguous and start right after the snapshot (at index 1 without
+	// one). The caller has already loaded the snapshot into its state
+	// machine.
 	HardState HardState
+	Snapshot  *Snapshot
 	Entries   []Entry
 
 	// Knobs deliberately break Raft rules, so tests can check that the
@@ -80,9 +83,13 @@ func (c Config) validate() error {
 	case c.Rand == nil:
 		return errors.New("raft: Rand is required")
 	}
+	var first uint64 = 1
+	if c.Snapshot != nil {
+		first = c.Snapshot.Index + 1
+	}
 	for i, e := range c.Entries {
-		if e.Index != uint64(i+1) {
-			return errors.New("raft: recovered entries must start at index 1 and be contiguous")
+		if e.Index != first+uint64(i) {
+			return errors.New("raft: recovered entries must be contiguous and start right after the snapshot")
 		}
 		if i > 0 && e.Term < c.Entries[i-1].Term {
 			return errors.New("raft: recovered entries have decreasing terms")
@@ -105,6 +112,10 @@ type Node struct {
 	term Term   // currentTerm
 	vote NodeID // votedFor
 	log  raftLog
+
+	// snapshot is the latest snapshot, kept to send to followers that need
+	// entries this node has compacted away. Nil until there is one.
+	snapshot *Snapshot
 
 	// Volatile state on all servers (Figure 2).
 	commitIndex uint64
@@ -139,6 +150,7 @@ type Node struct {
 
 	// Output waiting for the caller, and what the last Ready handed out.
 	msgs        []Message
+	newSnapshot *Snapshot // installed from the leader, not yet handed out
 	savedHard   HardState // last HardState the caller confirmed saving
 	readyHard   HardState // HardState in the Ready awaiting Advance
 	unstable    uint64    // first log index not yet handed out in Ready.Entries
@@ -167,6 +179,13 @@ func NewNode(cfg Config) (*Node, error) {
 		term:      cfg.HardState.Term,
 		vote:      cfg.HardState.Vote,
 		savedHard: cfg.HardState,
+	}
+	if s := cfg.Snapshot; s != nil {
+		n.log.restore(s.Index, s.Term)
+		n.snapshot = s
+		// A snapshot only ever holds committed entries, and the caller has
+		// loaded it into its state machine.
+		n.commitIndex, n.applied = s.Index, s.Index
 	}
 	n.log.entries = slices.Clone(cfg.Entries)
 	n.unstable = n.log.lastIndex() + 1 // recovered entries are already durable
@@ -285,6 +304,8 @@ func (n *Node) Step(m Message) {
 		n.handleAppendEntries(m)
 	case MsgAppResp:
 		n.handleAppendResponse(m)
+	case MsgSnap:
+		n.handleSnapshot(m)
 	}
 }
 
@@ -300,6 +321,7 @@ func (n *Node) Ready() Ready {
 	rd.Messages = n.msgs
 	rd.CommittedEntries = n.log.slice(n.applied+1, n.commitIndex+1)
 	rd.ReadStates = n.readStates
+	rd.Snapshot = n.newSnapshot
 
 	n.readyHard = hs
 	n.readyStable = n.log.lastIndex() + 1
@@ -314,6 +336,7 @@ func (n *Node) Advance() {
 	n.applied = n.readyApply
 	n.msgs = nil
 	n.readStates = nil
+	n.newSnapshot = nil
 }
 
 // Status returns a snapshot of the node's state.
@@ -321,12 +344,43 @@ func (n *Node) Status() Status {
 	return Status{
 		ID: n.id, Role: n.role, Term: n.term, Vote: n.vote, Leader: n.leader,
 		LastIndex: n.log.lastIndex(), LastTerm: n.log.lastTerm(), Commit: n.commitIndex,
+		SnapIndex: n.log.snapIndex, SnapTerm: n.log.snapTerm,
 	}
 }
 
-// Entries returns the whole log. The slice is shared with the node, so the
-// caller must not modify it, and must not keep it past the next call into
-// the node. It is meant for invariant checks in tests.
+// ErrCompacted is returned by Compact for an index already compacted.
+var ErrCompacted = errors.New("raft: index already compacted")
+
+// ErrUnapplied is returned by Compact for an index not yet applied.
+var ErrUnapplied = errors.New("raft: can't compact entries that haven't been applied")
+
+// Compact records that the caller has durably saved a snapshot of its state
+// machine as of entry index, and discards the log up to and including it
+// (§7). data is the snapshot itself, kept to send to followers that are too
+// far behind to catch up from the log.
+//
+// index must already have been applied: a snapshot is the result of
+// applying entries, so it can't cover entries the state machine hasn't
+// seen. The caller's storage must also stop needing those entries, which
+// is its business, not the node's.
+func (n *Node) Compact(index uint64, data []byte) (Snapshot, error) {
+	if index <= n.log.snapIndex {
+		return Snapshot{}, ErrCompacted
+	}
+	if index > n.applied {
+		return Snapshot{}, ErrUnapplied
+	}
+	t, _ := n.log.term(index)
+	n.log.compact(index)
+	n.snapshot = &Snapshot{Index: index, Term: t, Data: data}
+	n.unstable = max(n.unstable, n.log.firstIndex())
+	return *n.snapshot, nil
+}
+
+// Entries returns the log after the latest snapshot (see Status.SnapIndex
+// for where it starts). The slice is shared with the node, so the caller
+// must not modify it, and must not keep it past the next call into the
+// node.
 func (n *Node) Entries() []Entry { return n.log.entries }
 
 // becomeFollower switches to follower in the given term. Moving to a new
