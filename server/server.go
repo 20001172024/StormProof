@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"math/rand/v2"
 	"net"
+	"net/http"
 	"sync"
 	"time"
 
@@ -48,6 +49,12 @@ type Config struct {
 	// use it to pick free ports.
 	Listener net.Listener
 	Logger   *slog.Logger
+
+	// MetricsAddr, if set, serves Prometheus metrics at /metrics and the
+	// /healthz and /readyz probes over HTTP. MetricsListener, if set, is
+	// used instead.
+	MetricsAddr     string
+	MetricsListener net.Listener
 }
 
 // Server is one StormProof server: a host.Host driven by real time, real
@@ -65,6 +72,9 @@ type Server struct {
 	tr   *transport.Transport
 	grpc *grpc.Server
 	lis  net.Listener
+
+	metrics *metrics
+	http    *http.Server
 
 	inbox chan raft.Message
 	calls chan call
@@ -123,17 +133,23 @@ func New(cfg Config) (*Server, error) {
 	if err != nil {
 		return nil, fmt.Errorf("server: recovering from %s: %w", cfg.DataDir, err)
 	}
-	tr, err := transport.New(others, transport.Options{})
-	if err != nil {
-		_ = h.Close()
-		return nil, err
-	}
 	s := &Server{
-		cfg: cfg, log: cfg.Logger.With("node", cfg.ID), host: h, tr: tr,
+		cfg: cfg, log: cfg.Logger.With("node", cfg.ID), host: h,
 		inbox: make(chan raft.Message, 4096),
 		calls: make(chan call, 1024),
 		stop:  make(chan struct{}),
 		done:  make(chan struct{}),
+	}
+	s.metrics = newMetrics(cfg.ID, func() float64 {
+		var n uint64
+		for _, d := range s.tr.Dropped() {
+			n += d
+		}
+		return float64(n)
+	})
+	if s.tr, err = transport.New(others, transport.Options{OnSend: s.metrics.observeSend}); err != nil {
+		_ = h.Close()
+		return nil, err
 	}
 	s.status = h.Status()
 	s.grpc = grpc.NewServer()
@@ -172,6 +188,21 @@ func (s *Server) Start() error {
 			s.log.Error("grpc serve", "err", err)
 		}
 	}()
+	if mlis := s.cfg.MetricsListener; mlis != nil || s.cfg.MetricsAddr != "" {
+		if mlis == nil {
+			var err error
+			if mlis, err = net.Listen("tcp", s.cfg.MetricsAddr); err != nil {
+				s.grpc.Stop()
+				return err
+			}
+		}
+		s.http = &http.Server{Handler: s.handler(), ReadHeaderTimeout: 5 * time.Second}
+		go func() {
+			if err := s.http.Serve(mlis); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				s.log.Error("metrics serve", "err", err)
+			}
+		}()
+	}
 	// Log before the loop starts: from then on it owns s.status (the race
 	// detector caught an earlier version reading it here unlocked).
 	s.log.Info("started", "addr", lis.Addr().String(), "term", s.Status().Term)
@@ -203,6 +234,9 @@ func (s *Server) Stop() {
 	s.stopOnce.Do(func() {
 		close(s.stop)
 		<-s.done
+		if s.http != nil {
+			_ = s.http.Close()
+		}
 		s.grpc.Stop()
 		s.tr.Close()
 		if err := s.host.Close(); err != nil {
@@ -264,6 +298,7 @@ func (s *Server) run() {
 			}
 		}
 		st := s.host.Status()
+		s.metrics.observe(s.status, st, s.host.AppliedIndex())
 		s.mu.Lock()
 		if st.Role != s.status.Role || st.Term != s.status.Term {
 			s.log.Info("role change", "role", st.Role.String(), "term", st.Term, "leader", st.Leader)

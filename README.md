@@ -12,8 +12,9 @@ visualizer** for replaying failures step by step.
 > crash-safe write-ahead log (M4), the KV store with sessions, ReadIndex
 > reads and Porcupine linearizability checking (M5), snapshots with log
 > compaction (M6a) and single-server membership changes (M6b), all tested
-> in the simulator; and real mode (M7a): the same server code running over
-> gRPC with a CLI. Metrics and docker-compose (M7b) are next.
+> in the simulator; and real mode (M7): the same server code running over
+> gRPC, with a CLI, Prometheus metrics and docker-compose clusters. The
+> trace visualizer (M8) is next.
 
 ## Why it's built this way
 
@@ -60,6 +61,16 @@ export STORMPROOF_ENDPOINTS=localhost:7001,localhost:7002,localhost:7003
 bin/stormproof-cli put greeting hello
 bin/stormproof-cli get greeting
 bin/stormproof-cli cas greeting hello hi
+```
+
+Or with Docker (3 servers plus Prometheus on :9090; `docker-compose.5.yml`
+for 5):
+
+```bash
+docker compose -f deploy/docker/docker-compose.yml up -d --build --wait
+docker compose -f deploy/docker/docker-compose.yml run --rm cli put greeting hello
+docker compose -f deploy/docker/docker-compose.yml down -v
+deploy/docker/smoke.sh   # start, kill the leader, check writes continue, tear down
 ```
 
 Run the simulator:

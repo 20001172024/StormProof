@@ -742,5 +742,47 @@ time; tests use 10 ms ticks):
   disk and served the write made while it was down.
 
 **Not yet in real mode.** Membership changes (they need a way to learn a new
-server's address; planned with Kubernetes in M11); metrics and
-docker-compose (M7b); TLS or authentication.
+server's address; planned with Kubernetes in M11); TLS or authentication.
+
+## 15. Metrics and containers (M7b)
+
+**Metrics.** `stormproof-server -metrics :9090` serves Prometheus metrics
+at `/metrics` from a per-server registry (so several servers can share one
+process, as in the tests):
+
+| Metric | Kind | Meaning |
+|---|---|---|
+| `stormproof_raft_term`, `_role`, `_is_leader` | gauge | current term; 0 follower, 1 candidate, 2 leader |
+| `stormproof_raft_commit_index`, `_applied_index`, `_apply_lag` | gauge | commit and applied index, and their difference |
+| `stormproof_raft_last_index`, `_snapshot_index`, `_voters` | gauge | log end, last snapshot, configuration size |
+| `stormproof_raft_elections_started_total` | counter | times this server became a candidate |
+| `stormproof_raft_leader_changes_total` | counter | times the leader it knows of changed |
+| `stormproof_raft_messages_dropped_total` | counter | Raft messages dropped at a full send queue |
+| `stormproof_client_request_duration_seconds` | histogram | client requests, by op and gRPC code |
+| `stormproof_raft_send_duration_seconds` | histogram | Send RPCs to each peer, by peer and result |
+
+The event loop sets the gauges after every event, from the node's status,
+so they never race with Raft and cost nothing between scrapes. Two probes
+go with them: `/healthz` is 200 while the event loop runs (503 after the
+server stopped itself, for example on a storage failure); `/readyz` is 200
+once the server knows a leader.
+
+**Image.** A multi-stage Dockerfile builds static binaries and copies them
+onto alpine (44.7 MB); alpine rather than distroless because the compose
+health check needs `wget` to call `/readyz`. Behind a TLS-intercepting
+proxy (as in the development container) the build takes the proxy's CA as
+an optional build secret, used only for downloading modules and never
+stored in the image.
+
+**docker-compose.** `deploy/docker/docker-compose.yml` (3 servers) and
+`docker-compose.5.yml` (5) each run Prometheus too, scraping every server.
+The CLI runs as a compose service, because servers point clients at the
+leader by its address inside the compose network. `deploy/docker/smoke.sh`
+starts a cluster, writes and reads, kills the leader's container, writes
+again, restarts it, and checks it caught up. It also runs in CI, which
+pushes the image to the GitHub Container Registry on merges to main.
+
+Run in the development container: both clusters passed; the first write
+after killing the leader took 586 ms (3 servers) and 513 ms (5), counting
+the time to start the CLI container; Prometheus scraped all five targets of
+the 5-server cluster, with exactly one reporting `is_leader`.

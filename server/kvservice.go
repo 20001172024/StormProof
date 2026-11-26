@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"strconv"
+	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -32,7 +33,9 @@ type kvService struct {
 // result. Not the leader: FailedPrecondition, with the leader's address in
 // the trailer if known. Outcome unknown or not ready: Unavailable, so the
 // client retries with the same request ID.
-func (k *kvService) do(ctx context.Context, cmd kv.Command) (kv.Result, error) {
+func (k *kvService) do(ctx context.Context, cmd kv.Command) (r kv.Result, err error) {
+	start := time.Now()
+	defer func() { k.s.metrics.observeRequest(cmd.Op.String(), status.Code(err).String(), time.Since(start)) }()
 	c := call{req: host.Request{Cmd: cmd}, resp: make(chan host.Response, 1)}
 	select {
 	case k.s.calls <- c:
@@ -41,9 +44,9 @@ func (k *kvService) do(ctx context.Context, cmd kv.Command) (kv.Result, error) {
 	case <-ctx.Done():
 		return kv.Result{}, status.FromContextError(ctx.Err()).Err()
 	}
-	var r host.Response
+	var resp host.Response
 	select {
-	case r = <-c.resp:
+	case resp = <-c.resp:
 	case <-k.s.done:
 		return kv.Result{}, status.Error(codes.Unavailable, "server stopped")
 	case <-ctx.Done():
@@ -51,12 +54,12 @@ func (k *kvService) do(ctx context.Context, cmd kv.Command) (kv.Result, error) {
 		// request ID, and dedup makes that safe.
 		return kv.Result{}, status.FromContextError(ctx.Err()).Err()
 	}
-	switch r.Status {
+	switch resp.Status {
 	case host.StatusOK:
-		return r.Result, nil
+		return resp.Result, nil
 	case host.StatusNotLeader:
-		if addr, ok := k.s.cfg.Cluster[r.Leader]; ok && r.Leader != k.s.cfg.ID {
-			_ = grpc.SetTrailer(ctx, metadata.Pairs(LeaderAddrTrailer, addr, LeaderIDTrailer, strconv.FormatUint(uint64(r.Leader), 10)))
+		if addr, ok := k.s.cfg.Cluster[resp.Leader]; ok && resp.Leader != k.s.cfg.ID {
+			_ = grpc.SetTrailer(ctx, metadata.Pairs(LeaderAddrTrailer, addr, LeaderIDTrailer, strconv.FormatUint(uint64(resp.Leader), 10)))
 		}
 		return kv.Result{}, status.Error(codes.FailedPrecondition, "not the leader")
 	default:

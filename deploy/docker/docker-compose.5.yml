@@ -1,0 +1,81 @@
+# A 5-server StormProof cluster with Prometheus, on one machine.
+#
+#   docker compose -f deploy/docker/docker-compose.5.yml up -d --build --wait
+#   docker compose -f deploy/docker/docker-compose.5.yml run --rm cli put greeting hello
+#   docker compose -f deploy/docker/docker-compose.5.yml down -v      # -v also deletes the data volumes
+#
+# Ports on the host: node i serves gRPC on 7000+i and metrics on 9100+i;
+# Prometheus is on 9090. Run the CLI through the `cli` service rather than
+# from the host: servers point clients at the leader by its address inside
+# the compose network (node2:7000), which the host can't resolve.
+# (docker-compose.yml is the 3-server version.)
+
+name: stormproof5
+
+x-node: &node
+  image: stormproof:latest
+  build:
+    context: ../..
+    dockerfile: deploy/docker/Dockerfile
+  healthcheck:
+    # Ready once the server knows a leader.
+    test: ["CMD", "wget", "-qO-", "http://localhost:9090/readyz"]
+    interval: 2s
+    timeout: 2s
+    retries: 30
+
+services:
+  node1:
+    <<: *node
+    hostname: node1
+    command: ["-id", "1", "-cluster", "1=node1:7000,2=node2:7000,3=node3:7000,4=node4:7000,5=node5:7000", "-data", "/data", "-metrics", ":9090"]
+    volumes: ["node1-data:/data"]
+    ports: ["7001:7000", "9101:9090"]
+
+  node2:
+    <<: *node
+    hostname: node2
+    command: ["-id", "2", "-cluster", "1=node1:7000,2=node2:7000,3=node3:7000,4=node4:7000,5=node5:7000", "-data", "/data", "-metrics", ":9090"]
+    volumes: ["node2-data:/data"]
+    ports: ["7002:7000", "9102:9090"]
+
+  node3:
+    <<: *node
+    hostname: node3
+    command: ["-id", "3", "-cluster", "1=node1:7000,2=node2:7000,3=node3:7000,4=node4:7000,5=node5:7000", "-data", "/data", "-metrics", ":9090"]
+    volumes: ["node3-data:/data"]
+    ports: ["7003:7000", "9103:9090"]
+
+  node4:
+    <<: *node
+    hostname: node4
+    command: ["-id", "4", "-cluster", "1=node1:7000,2=node2:7000,3=node3:7000,4=node4:7000,5=node5:7000", "-data", "/data", "-metrics", ":9090"]
+    volumes: ["node4-data:/data"]
+    ports: ["7004:7000", "9104:9090"]
+
+  node5:
+    <<: *node
+    hostname: node5
+    command: ["-id", "5", "-cluster", "1=node1:7000,2=node2:7000,3=node3:7000,4=node4:7000,5=node5:7000", "-data", "/data", "-metrics", ":9090"]
+    volumes: ["node5-data:/data"]
+    ports: ["7005:7000", "9105:9090"]
+
+  cli:
+    image: stormproof:latest
+    profiles: ["tools"]
+    entrypoint: ["stormproof-cli"]
+    environment:
+      STORMPROOF_ENDPOINTS: "node1:7000,node2:7000,node3:7000,node4:7000,node5:7000"
+
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    command: ["--config.file=/etc/prometheus/prometheus.yml"]
+    volumes: ["../monitoring/prometheus-5.yml:/etc/prometheus/prometheus.yml:ro"]
+    ports: ["9090:9090"]
+
+volumes:
+  node1-data:
+  node2-data:
+  node3-data:
+  node4-data:
+  node5-data:

@@ -3,9 +3,13 @@ package server
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"math/rand/v2"
 	"net"
+	"net/http"
+	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -24,11 +28,12 @@ type testCluster struct {
 	addrs   map[raft.NodeID]string
 	dirs    map[raft.NodeID]string
 	servers map[raft.NodeID]*Server
+	metrics map[raft.NodeID]string // metrics HTTP address of each running server
 }
 
 func newTestCluster(t *testing.T, n int) *testCluster {
 	t.Helper()
-	c := &testCluster{t: t, addrs: map[raft.NodeID]string{}, dirs: map[raft.NodeID]string{}, servers: map[raft.NodeID]*Server{}}
+	c := &testCluster{t: t, addrs: map[raft.NodeID]string{}, dirs: map[raft.NodeID]string{}, servers: map[raft.NodeID]*Server{}, metrics: map[raft.NodeID]string{}}
 	listeners := map[raft.NodeID]net.Listener{}
 	for i := 1; i <= n; i++ {
 		id := raft.NodeID(i)
@@ -51,9 +56,14 @@ func newTestCluster(t *testing.T, n int) *testCluster {
 
 func (c *testCluster) start(id raft.NodeID, lis net.Listener) {
 	c.t.Helper()
+	mlis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		c.t.Fatal(err)
+	}
+	c.metrics[id] = mlis.Addr().String()
 	s, err := New(Config{
 		ID: id, Cluster: c.addrs, DataDir: c.dirs[id], Tick: 10 * time.Millisecond,
-		SnapshotEvery: 100, Listener: lis,
+		SnapshotEvery: 100, Listener: lis, MetricsListener: mlis,
 		Logger: slog.New(slog.DiscardHandler),
 	})
 	if err != nil {
@@ -289,5 +299,99 @@ func TestLinearizableOnRealCluster(t *testing.T) {
 	}
 	if !check.Linearizable(ops) {
 		t.Fatal("the real cluster's history is not linearizable")
+	}
+}
+
+// scrape fetches a server's /metrics and returns each sample's value, keyed
+// by the metric name with its labels (as Prometheus prints it).
+func scrape(t *testing.T, addr string) map[string]float64 {
+	t.Helper()
+	resp, err := http.Get("http://" + addr + "/metrics")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, _ := io.ReadAll(resp.Body)
+	out := map[string]float64{}
+	for _, line := range strings.Split(string(body), "\n") {
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		name, val, ok := strings.Cut(line, " ")
+		if !ok {
+			continue
+		}
+		if v, err := strconv.ParseFloat(val, 64); err == nil {
+			out[name] = v
+		}
+	}
+	return out
+}
+
+func probe(t *testing.T, addr, path string) int {
+	t.Helper()
+	resp, err := http.Get("http://" + addr + path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	return resp.StatusCode
+}
+
+func TestMetricsAndProbes(t *testing.T) {
+	c := newTestCluster(t, 3)
+	cl := c.client()
+	cx := ctx(t)
+	for i := 0; i < 20; i++ {
+		if err := cl.Put(cx, "k", []byte(fmt.Sprint(i))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, _, err := cl.Get(cx, "k"); err != nil {
+		t.Fatal(err)
+	}
+	leader := c.leader()
+	time.Sleep(50 * time.Millisecond) // a few ticks for followers to apply the last entries
+	elections := 0.0
+	for id, addr := range c.metrics {
+		m := scrape(t, addr)
+		node := fmt.Sprintf(`{node="%d"}`, id)
+		want := map[string]float64{"stormproof_raft_voters": 3, "stormproof_raft_apply_lag": 0}
+		if id == leader {
+			want["stormproof_raft_is_leader"], want["stormproof_raft_role"] = 1, 2
+		} else {
+			want["stormproof_raft_is_leader"], want["stormproof_raft_role"] = 0, 0
+		}
+		for name, v := range want {
+			if got, ok := m[name+node]; !ok || got != v {
+				t.Errorf("node %d: %s = %v (present %v), want %v", id, name, got, ok, v)
+			}
+		}
+		if m["stormproof_raft_term"+node] < 1 || m["stormproof_raft_commit_index"+node] < 21 {
+			t.Errorf("node %d: term %v, commit %v", id, m["stormproof_raft_term"+node], m["stormproof_raft_commit_index"+node])
+		}
+		if m["stormproof_raft_leader_changes_total"+node] < 1 {
+			t.Errorf("node %d never saw a leader", id)
+		}
+		elections += m["stormproof_raft_elections_started_total"+node]
+		if probe(t, addr, "/healthz") != http.StatusOK || probe(t, addr, "/readyz") != http.StatusOK {
+			t.Errorf("node %d: probes not OK", id)
+		}
+	}
+	if elections < 1 {
+		t.Error("no server counted an election")
+	}
+	lm := scrape(t, c.metrics[leader])
+	if n := lm[fmt.Sprintf(`stormproof_client_request_duration_seconds_count{code="OK",node="%d",op="put"}`, leader)]; n < 20 {
+		t.Errorf("leader counted %v successful puts, want at least 20", n)
+	}
+	sends := 0.0
+	for name, v := range lm {
+		if strings.HasPrefix(name, "stormproof_raft_send_duration_seconds_count") && strings.Contains(name, `result="ok"`) {
+			sends += v
+		}
+	}
+	if sends == 0 {
+		t.Error("leader recorded no successful Raft sends")
 	}
 }
