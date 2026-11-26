@@ -240,3 +240,146 @@ func TestEncodeVoters(t *testing.T) {
 		t.Fatal("decoded a truncated configuration")
 	}
 }
+
+// crashNode stops a node in a scripted test: it comes back as a follower
+// from its persisted state (everything is persisted in this harness), and
+// is cut off until revived.
+func (c *cluster) crashNode(id NodeID, down map[NodeID]bool) {
+	n := c.nodes[id]
+	cfg := n.cfg
+	cfg.HardState = HardState{Term: n.term, Vote: n.vote}
+	cfg.Entries = slices.Clone(n.log.entries)
+	cfg.Snapshot = n.snapshot
+	r, err := NewNode(cfg)
+	if err != nil {
+		c.t.Fatal(err)
+	}
+	c.nodes[id] = r
+	down[id] = true
+}
+
+// The bug Ongaro found in single-server changes in 2015, scripted. Initial
+// configuration C = {1,2,3,4}.
+//
+//	(a) Leader 1 (term 1) starts adding 5: C1 = {1..5} reaches only node 5.
+//	(b) 1 crashes. 2 is elected in term 2 by 2, 3, 4 under C, and, before
+//	    committing anything in its own term, starts removing 4:
+//	    C2 = {1,2,3}. Its entries reach only 3, which is a majority of C2,
+//	    so C2 commits.
+//	(c) 2 crashes and 1 comes back. Under C1, 1 needs 3 of 5 votes and gets
+//	    them from 1, 4 and 5 (none of them has 2's term-2 entries).
+//	(d) 1 overwrites 3's log with its own: the committed C2 is gone.
+//
+// The fix is the rule that a leader must commit an entry in its own term
+// before changing the configuration. Then in (b) 2's no-op would need 3 of
+// C's 4 servers, so 4 would have it and refuse to vote for 1 in (c).
+func TestOngaro2015Bug(t *testing.T) {
+	for _, unsafe := range []bool{false, true} {
+		t.Run(map[bool]string{false: "with the fix", true: "without the fix"}[unsafe], func(t *testing.T) {
+			c := memberCluster(t, 5, 4)
+			for _, n := range c.nodes {
+				n.cfg.Knobs.ConfChangeBeforeOwnTermCommit = unsafe
+			}
+			down := map[NodeID]bool{}
+			var block func(Message) bool
+			c.drop = func(m Message) bool { return down[m.From] || down[m.To] || (block != nil && block(m)) }
+
+			// (a)
+			c.elect(1)
+			block = func(m Message) bool { return m.From == 1 && m.To != 5 }
+			if _, err := c.nodes[1].ProposeConfChange(ConfChange{Op: AddVoter, Node: 5}); err != nil {
+				t.Fatal(err)
+			}
+			c.settle()
+			block = nil
+
+			// (b)
+			c.crashNode(1, down)
+			// 4 votes for 2 but never receives 2's entries.
+			block = func(m Message) bool {
+				return (m.From == 2 && m.To == 4 && m.Type != MsgVote) || (m.From == 4 && m.To == 2 && m.Type != MsgVoteResp)
+			}
+			c.campaign(2)
+			idx, err := c.nodes[2].ProposeConfChange(ConfChange{Op: RemoveVoter, Node: 4})
+			if !unsafe {
+				if !errors.Is(err, ErrConfChangeNotReady) {
+					t.Fatalf("err = %v, want ErrConfChangeNotReady", err)
+				}
+				return // the dangerous change never happens
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			c.settle()
+			c.heartbeat(2)
+			if c.nodes[2].commitIndex < idx {
+				t.Fatal("setup: C2 should have committed with 2 and 3")
+			}
+			committed := c.nodes[3].log.entries[idx-1]
+			block = nil
+
+			// (c)
+			c.crashNode(2, down)
+			delete(down, 1)
+			c.campaign(1)
+
+			// (d)
+			c.heartbeat(1)
+			if got, ok := c.nodes[3].log.term(idx); ok && got == committed.Term {
+				t.Fatalf("node 3 still has the committed C2 at %d", idx)
+			}
+		})
+	}
+}
+
+// Two membership changes in flight at once, scripted. Configuration
+// {1,2,3}; leader 1 adds 4 and then 5 without waiting, and only 4 and 5 hear
+// of it. 1 now uses {1..5}, where 1, 4 and 5 are a majority, while 2 and 3
+// still use {1,2,3}, where they are a majority. Both sides commit different
+// entries at the same index. With the one-change-at-a-time rule the second
+// change is refused.
+func TestConcurrentConfChanges(t *testing.T) {
+	for _, unsafe := range []bool{false, true} {
+		c := memberCluster(t, 5, 3)
+		for _, n := range c.nodes {
+			n.cfg.Knobs.ConcurrentConfChanges = unsafe
+		}
+		c.elect(1)
+		toNew := func(m Message) bool {
+			return (m.From == 2 || m.From == 3 || m.To == 2 || m.To == 3) && (m.From == 1 || m.To == 1)
+		}
+		c.drop = toNew
+		if _, err := c.nodes[1].ProposeConfChange(ConfChange{Op: AddVoter, Node: 4}); err != nil {
+			t.Fatal(err)
+		}
+		_, err := c.nodes[1].ProposeConfChange(ConfChange{Op: AddVoter, Node: 5})
+		if !unsafe {
+			if !errors.Is(err, ErrConfChangeInProgress) {
+				t.Fatalf("err = %v, want ErrConfChangeInProgress", err)
+			}
+			continue
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		c.settle()
+		c.propose(1, "committed by 1, 4, 5")
+		idx := c.nodes[1].log.lastIndex()
+		if c.nodes[1].commitIndex < idx {
+			t.Fatal("setup: 1 should commit with 4 and 5")
+		}
+
+		// 2 and 3 never heard of either change, and elect 2.
+		oldSide := func(id NodeID) bool { return id == 2 || id == 3 }
+		c.drop = func(m Message) bool { return !oldSide(m.From) || !oldSide(m.To) }
+		c.campaign(2)
+		for c.nodes[2].log.lastIndex() < idx {
+			c.propose(2, "committed by 2, 3")
+		}
+		c.heartbeat(2)
+		a, b := c.nodes[1].log.entries[idx-1], c.nodes[2].log.entries[idx-1]
+		if c.nodes[2].commitIndex < idx || a.Term == b.Term {
+			t.Fatalf("expected two different committed entries at %d: %v and %v (2 committed to %d)", idx, a, b, c.nodes[2].commitIndex)
+		}
+	}
+}
