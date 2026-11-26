@@ -30,7 +30,7 @@ func TestMembershipUnderAllProfiles(t *testing.T) {
 	for _, p := range sim.Profiles {
 		t.Run(p.Name, func(t *testing.T) {
 			changes := 0
-			for seed := uint64(1); seed <= 10; seed++ {
+			for seed := uint64(1); seed <= seedCount(10); seed++ {
 				cfg := memberConfig(seed, p.Name, testOptions())
 				final := cfg.FinalCheck
 				cfg.FinalCheck = func(nodes []sim.NodeView) error {
@@ -45,8 +45,8 @@ func TestMembershipUnderAllProfiles(t *testing.T) {
 					t.Fatalf("seed %d: %v", seed, res.Violation)
 				}
 			}
-			if changes < 20 {
-				t.Fatalf("only %d membership changes in 10 runs", changes)
+			if runs := seedCount(10); changes < 2*int(runs) {
+				t.Fatalf("only %d membership changes in %d runs", changes, runs)
 			}
 		})
 	}
