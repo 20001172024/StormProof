@@ -8,6 +8,7 @@ import (
 
 	"github.com/20001172024/stormproof/check"
 	"github.com/20001172024/stormproof/raft"
+	"github.com/20001172024/stormproof/server/host"
 	"github.com/20001172024/stormproof/sim"
 )
 
@@ -21,12 +22,24 @@ func Invariants() []sim.Invariant {
 		&logMatching{seen: map[sim.NodeID]version{}},
 		&leaderCompleteness{seen: map[sim.NodeID]version{}},
 		&singleServerChanges{seen: map[sim.NodeID]version{}},
-		&stateMachineSafety{snaps: map[uint64][]byte{}, states: map[uint64]stateSeen{}, seen: map[sim.NodeID]*Process{},
+		&stateMachineSafety{snaps: map[uint64][]byte{}, states: map[uint64]stateSeen{}, seen: map[sim.NodeID]inspectable{},
 			checked: map[sim.NodeID]int{}, checkedSnaps: map[sim.NodeID]int{}, checkedState: map[sim.NodeID]int{}},
 	}
 }
 
-func proc(nv sim.NodeView) *Process { return nv.Process.(*Process) }
+// inspectable is what the invariants need to see of a server. *Process
+// implements it; tests check the invariants against fakes.
+type inspectable interface {
+	Status() raft.Status
+	Entries() []raft.Entry
+	LogVersion() uint64
+	Applied() []raft.Entry
+	AppliedIndex() uint64
+	Snapshots() []raft.Snapshot
+	States() []host.IndexedState
+}
+
+func proc(nv sim.NodeView) inspectable { return nv.Process.(inspectable) }
 
 // servers drops the clients from a final check's node list.
 func servers(nodes []sim.NodeView) []sim.NodeView {
@@ -68,7 +81,7 @@ func SettledAndLinearizable(nodes []sim.NodeView) error {
 // makes a new one), how many times its log has changed, and its commit
 // index. If it is the same as at the last check, the log is unchanged.
 type version struct {
-	p      *Process
+	p      inspectable
 	log    uint64
 	commit uint64
 	extra  int // checker-specific, e.g. how many committed entries were known
@@ -83,7 +96,7 @@ func sameEntry(a, b raft.Entry) bool {
 	return a.Index == b.Index && a.Term == b.Term && bytes.Equal(a.Data, b.Data)
 }
 
-func status(nv sim.NodeView) raft.Status { return nv.Process.(*Process).Status() }
+func status(nv sim.NodeView) raft.Status { return proc(nv).Status() }
 
 // electionSafety: "at most one leader can be elected in a given term"
 // (Figure 3). It remembers the leader of every term for the whole run, so a
@@ -363,7 +376,7 @@ type stateMachineSafety struct {
 	states  map[uint64]stateSeen
 	// Only new events are checked each time; a restarted node is a new
 	// process with its own history.
-	seen         map[sim.NodeID]*Process
+	seen         map[sim.NodeID]inspectable
 	checked      map[sim.NodeID]int
 	checkedSnaps map[sim.NodeID]int
 	checkedState map[sim.NodeID]int
