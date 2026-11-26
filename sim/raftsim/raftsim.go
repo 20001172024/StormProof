@@ -429,27 +429,22 @@ func (p *Process) installSnapshot(s raft.Snapshot) error {
 }
 
 // maybeSnapshot takes a snapshot once SnapshotEvery entries have been
-// applied since the last one: save it, compact the WAL, then let the node
-// discard the entries it covers.
+// applied since the last one: the node discards the entries it covers and
+// returns the snapshot (with the configuration at that index), which is
+// then saved and the WAL compacted.
+//
+// Compacting the node first is safe: it only changes memory. If saving
+// then fails, the node crashes and recovers from the WAL as it was.
 func (p *Process) maybeSnapshot() error {
 	every := p.opts.SnapshotEvery
 	if every == 0 || p.appliedIndex < p.node.Status().SnapIndex+every {
 		return nil
 	}
-	s := raft.Snapshot{Index: p.appliedIndex, Term: p.appliedTerm, Data: p.store.Snapshot()}
-	var after []raft.Entry
-	for _, e := range p.node.Entries() {
-		if e.Index > s.Index {
-			after = append(after, e)
-		}
+	s, err := p.node.Compact(p.appliedIndex, p.store.Snapshot())
+	if err != nil {
+		panic(fmt.Sprintf("compacting to %d: %v", p.appliedIndex, err)) // a bug in this code
 	}
-	if err := p.persistSnapshot(s, after); err != nil {
-		return err
-	}
-	if _, err := p.node.Compact(s.Index, s.Data); err != nil {
-		panic(fmt.Sprintf("compacting to %d: %v", s.Index, err)) // a bug in this code
-	}
-	return nil
+	return p.persistSnapshot(s, p.node.Entries())
 }
 
 // serveConfirmedReads answers reads whose ReadIndex has been confirmed, once
