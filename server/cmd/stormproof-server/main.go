@@ -1,6 +1,6 @@
 // Command stormproof-server runs one StormProof server.
 //
-//	stormproof-server -id 1 -cluster 1=localhost:7001,2=localhost:7002,3=localhost:7003 -data /var/lib/stormproof
+//	stormproof-server -id 1 -cluster 1=localhost:7001,2=localhost:7002,3=localhost:7003 -data /var/lib/stormproof -metrics :9091
 //
 // Every server gets the same -cluster list; it listens on its own entry.
 // The data directory holds the write-ahead log and snapshots; restarting
@@ -40,6 +40,7 @@ func run(args []string) error {
 		election = fl.Int("election-ticks", 10, "base election timeout in ticks (actual: random in [n, 2n))")
 		hb       = fl.Int("heartbeat-ticks", 1, "heartbeat interval in ticks")
 		snapshot = fl.Uint64("snapshot-every", 10_000, "take a snapshot every this many applied entries")
+		metrics  = fl.String("metrics", "", "serve Prometheus /metrics and /healthz, /readyz on this address (e.g. :9090)")
 		verbose  = fl.Bool("v", false, "debug logging")
 	)
 	if err := fl.Parse(args); err != nil {
@@ -61,7 +62,7 @@ func run(args []string) error {
 	s, err := server.New(server.Config{
 		ID: raft.NodeID(*id), Cluster: members, DataDir: *data,
 		Tick: *tick, ElectionTicks: *election, HeartbeatTicks: *hb, SnapshotEvery: *snapshot,
-		Logger: log,
+		MetricsAddr: *metrics, Logger: log,
 	})
 	if err != nil {
 		return err
