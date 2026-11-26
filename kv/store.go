@@ -40,6 +40,17 @@ func NewStoreWithoutDedup() *Store {
 	return s
 }
 
+// TestingKnobs plant bugs in a store, for tests that check the checkers.
+type TestingKnobs struct {
+	NoDedup               bool // switch off duplicate detection
+	SnapshotDropsSessions bool // leave the session table out of snapshots
+}
+
+// SetTestingKnobs plants the given bugs. Never call it outside tests.
+func (s *Store) SetTestingKnobs(k TestingKnobs) {
+	s.noDedup, s.snapshotDropsSessions = k.NoDedup, k.SnapshotDropsSessions
+}
+
 // NewStoreWithBrokenSnapshots returns a store whose snapshots leave out the
 // client sessions. Only for tests that check the checker.
 func NewStoreWithBrokenSnapshots() *Store {
