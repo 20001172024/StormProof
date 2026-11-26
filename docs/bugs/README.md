@@ -9,7 +9,8 @@ on purpose to test the simulator (`-buggy`, `TestingKnobs`) are not.
 | [001](001-quiet-period-disk-faults.md) | simulator | The quiet period didn't stop injected fsync failures | `crashes` seed 4, end-of-run check |
 | [002](002-workload-restart-ticks.md) | test workload | A restarted leader kept proposing after the workload should have stopped | `crashes` seed 14, end-of-run check |
 | [003](003-leader-completeness-stale-leader.md) | invariant checker | Leader completeness flagged stale leaders that Raft makes no promise about | `partitions` seed 1, leader completeness |
+| [004](004-startup-fsync-failure-as-violation.md) | simulator | An injected fsync failure while a node restarted was reported as unrecoverable state | 5-node sweep, seeds 224, 572, 987 |
 
-So far none of the bugs is in the Raft implementation itself. All three
+So far none of the bugs is in the Raft implementation itself. All of them
 are in the testing infrastructure, which is a reminder that the checker
 needs testing as much as the system it checks.

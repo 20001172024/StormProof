@@ -9,6 +9,7 @@ func (n *Node) campaign() {
 	n.role = Candidate
 	n.leader = None
 	n.votes = map[NodeID]bool{n.id: true}
+	n.pendingReads = nil
 	n.resetElectionTimer()
 
 	if len(n.votes) >= n.quorum() {

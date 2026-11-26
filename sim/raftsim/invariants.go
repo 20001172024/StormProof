@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/20001172024/stormproof/check"
 	"github.com/20001172024/stormproof/raft"
 	"github.com/20001172024/stormproof/sim"
 )
@@ -23,6 +24,42 @@ func Invariants() []sim.Invariant {
 }
 
 func proc(nv sim.NodeView) *Process { return nv.Process.(*Process) }
+
+// servers drops the clients from a final check's node list.
+func servers(nodes []sim.NodeView) []sim.NodeView {
+	var out []sim.NodeView
+	for _, nv := range nodes {
+		if !nv.Client {
+			out = append(out, nv)
+		}
+	}
+	return out
+}
+
+// Linearizable is the end-of-run check that the clients' combined history
+// is linearizable (checked with Porcupine). It needs no quiet period: an
+// operation still waiting for an answer counts as "may or may not have
+// happened".
+func Linearizable(nodes []sim.NodeView) error {
+	var ops []check.Op
+	for _, nv := range nodes {
+		if nv.Client {
+			ops = append(ops, nv.Process.(*Client).History()...)
+		}
+	}
+	if !check.Linearizable(ops) {
+		return fmt.Errorf("linearizability: the history of %d client operations is not linearizable", len(ops))
+	}
+	return nil
+}
+
+// SettledAndLinearizable runs both end-of-run checks.
+func SettledAndLinearizable(nodes []sim.NodeView) error {
+	if err := Settled(nodes); err != nil {
+		return err
+	}
+	return Linearizable(nodes)
+}
 
 // version identifies the state of a node's log: which process (a restart
 // makes a new one), how many times its log has changed, and its commit
@@ -303,6 +340,7 @@ func (s *stateMachineSafety) Check(nodes []sim.NodeView) error {
 // node's log is identical to the leader's and fully committed, and every
 // node has applied all of it.
 func Settled(nodes []sim.NodeView) error {
+	nodes = servers(nodes)
 	if err := StableLeader(nodes); err != nil {
 		return err
 	}
@@ -331,6 +369,7 @@ func Settled(nodes []sim.NodeView) error {
 // period: every node is up, they all agree on the same term, and exactly
 // one of them is the leader of it and known as leader by all.
 func StableLeader(nodes []sim.NodeView) error {
+	nodes = servers(nodes)
 	var leader raft.NodeID
 	var term raft.Term
 	for _, nv := range nodes {

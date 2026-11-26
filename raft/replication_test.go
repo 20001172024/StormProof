@@ -13,13 +13,14 @@ type cluster struct {
 	ids     []NodeID
 	nodes   map[NodeID]*Node
 	applied map[NodeID][]Entry
+	reads   map[NodeID][]ReadState
 	// drop, if set, decides which messages are lost.
 	drop func(Message) bool
 }
 
 func newCluster(t *testing.T, size int) *cluster {
 	t.Helper()
-	c := &cluster{t: t, nodes: map[NodeID]*Node{}, applied: map[NodeID][]Entry{}}
+	c := &cluster{t: t, nodes: map[NodeID]*Node{}, applied: map[NodeID][]Entry{}, reads: map[NodeID][]ReadState{}}
 	for i := 1; i <= size; i++ {
 		c.ids = append(c.ids, NodeID(i))
 	}
@@ -54,6 +55,7 @@ func (c *cluster) settle() {
 		for _, id := range c.ids {
 			rd := c.nodes[id].Ready()
 			c.applied[id] = append(c.applied[id], rd.CommittedEntries...)
+			c.reads[id] = append(c.reads[id], rd.ReadStates...)
 			queue = append(queue, rd.Messages...)
 			c.nodes[id].Advance()
 		}

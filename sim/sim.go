@@ -55,11 +55,12 @@ type Invariant interface {
 	Check(nodes []NodeView) error
 }
 
-// NodeView is what an invariant can see of one node.
+// NodeView is what an invariant or final check can see of one node.
 type NodeView struct {
 	ID      NodeID
 	Up      bool
 	Process Process // nil while the node is down
+	Client  bool    // only final checks see clients
 }
 
 // Config describes one simulation run.
@@ -70,6 +71,14 @@ type Config struct {
 	TickInterval Time // base interval between a node's ticks
 	Profile      Profile
 	NewProcess   ProcessFactory
+	// Clients is the number of client processes, created with NewClient.
+	// They get IDs Nodes+1 .. Nodes+Clients, use the same network as the
+	// servers (so their messages can be lost, delayed and duplicated), but
+	// are never crashed or partitioned, and invariants don't see them. Their
+	// Env.Peers lists the servers.
+	Clients   int
+	NewClient ProcessFactory
+
 	// NewInvariants returns fresh invariants for this run. It is a function
 	// because invariants may keep history, so each run needs new ones.
 	NewInvariants func() []Invariant
@@ -118,6 +127,7 @@ type Stats struct {
 
 type node struct {
 	id           NodeID
+	client       bool // a client: never crashed or partitioned, not seen by invariants
 	disk         *Disk
 	tickInterval Time
 	proc         Process // nil while down
@@ -166,7 +176,7 @@ func Run(cfg Config) (Result, error) {
 	}
 
 	s.trace.write(Header{
-		Type: "header", Version: TraceVersion, Seed: cfg.Seed, Nodes: cfg.Nodes,
+		Type: "header", Version: TraceVersion, Seed: cfg.Seed, Nodes: cfg.Nodes, Clients: cfg.Clients,
 		Duration: cfg.Duration, TickInterval: cfg.TickInterval, Profile: cfg.Profile,
 	})
 
@@ -178,6 +188,16 @@ func Run(cfg Config) (Result, error) {
 			id:           id,
 			disk:         NewDisk(cfg.Profile.Disk, NewRand(cfg.Seed, fmt.Sprintf("disk/%d", id))),
 			tickInterval: cfg.TickInterval + s.clock.Between(-skew, skew+1),
+		})
+	}
+	// Clients come after the servers, so server IDs are 1..Nodes.
+	for i := 1; i <= cfg.Clients; i++ {
+		id := NodeID(cfg.Nodes + i)
+		s.nodes = append(s.nodes, &node{
+			id:           id,
+			client:       true,
+			disk:         NewDisk(DiskConfig{}, NewRand(cfg.Seed, fmt.Sprintf("disk/%d", id))),
+			tickInterval: cfg.TickInterval,
 		})
 	}
 	for _, n := range s.nodes {
@@ -204,7 +224,7 @@ func Run(cfg Config) (Result, error) {
 	}
 
 	if s.res.Violation == nil && s.err == nil && cfg.FinalCheck != nil {
-		if err := cfg.FinalCheck(s.views()); err != nil {
+		if err := cfg.FinalCheck(s.views(true)); err != nil {
 			s.violate("final-check", err.Error())
 		}
 	}
@@ -227,6 +247,8 @@ func validate(cfg Config) error {
 		return errors.New("sim: Duration must be positive")
 	case cfg.NewProcess == nil:
 		return errors.New("sim: NewProcess is required")
+	case cfg.Clients < 0 || (cfg.Clients > 0 && cfg.NewClient == nil):
+		return errors.New("sim: Clients needs NewClient")
 	case cfg.Profile.ClockSkew < 0 || cfg.Profile.ClockSkew >= 1:
 		return errors.New("sim: ClockSkew must be in [0, 1)")
 	case cfg.Quiet < 0 || cfg.Quiet > cfg.Duration:
@@ -282,19 +304,31 @@ func (s *simulation) start(n *node) {
 	if n.incarnation > 1 {
 		s.res.Stats.Restarts++
 	}
-	var peers []NodeID
+	var peers []NodeID // a server's other servers, or a client's servers
 	for _, id := range s.ids {
 		if id != n.id {
 			peers = append(peers, id)
 		}
 	}
-	proc, err := s.cfg.NewProcess(Env{
+	newProc := s.cfg.NewProcess
+	if n.client {
+		newProc = s.cfg.NewClient
+	}
+	proc, err := newProc(Env{
 		ID:    n.id,
 		Peers: peers,
 		Disk:  n.disk,
 		Rand:  NewRand(s.cfg.Seed, fmt.Sprintf("node/%d/%d", n.id, n.incarnation)),
 		Now:   func() Time { return s.now },
 	})
+	if errors.Is(err, ErrSyncFailed) {
+		// The disk failed while the node was starting (for example while
+		// repairing a torn WAL tail). That is a fault like any other, not a
+		// sign the saved state is broken: crash the node and restart it
+		// later. (Treating it as a recovery violation was bug 004.)
+		s.crash(n, true, "failed to start: "+err.Error())
+		return
+	}
 	if err != nil {
 		s.violate("recovery", fmt.Sprintf("node %d failed to start: %v", n.id, err))
 		return
@@ -406,7 +440,7 @@ func (s *simulation) rollFaults() {
 	if s.faults.Chance(f.CrashProb) {
 		var up []*node
 		for _, n := range s.nodes {
-			if n.proc != nil {
+			if n.proc != nil && !n.client {
 				up = append(up, n)
 			}
 		}
@@ -448,7 +482,7 @@ func (s *simulation) checkInvariants() {
 	if len(s.invariants) == 0 {
 		return
 	}
-	views := s.views()
+	views := s.views(false)
 	for _, inv := range s.invariants {
 		if err := inv.Check(views); err != nil {
 			s.violate(inv.Name(), err.Error())
@@ -457,10 +491,15 @@ func (s *simulation) checkInvariants() {
 	}
 }
 
-func (s *simulation) views() []NodeView {
-	views := make([]NodeView, len(s.nodes))
-	for i, n := range s.nodes {
-		views[i] = NodeView{ID: n.id, Up: n.proc != nil, Process: n.proc}
+// views describes the nodes for invariants (servers only) or for the final
+// check (servers, then clients).
+func (s *simulation) views(withClients bool) []NodeView {
+	var views []NodeView
+	for _, n := range s.nodes {
+		if n.client && !withClients {
+			continue
+		}
+		views = append(views, NodeView{ID: n.id, Up: n.proc != nil, Process: n.proc, Client: n.client})
 	}
 	return views
 }

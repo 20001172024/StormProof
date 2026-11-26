@@ -30,6 +30,7 @@ type Header struct {
 	Version      int     `json:"version"`
 	Seed         uint64  `json:"seed"`
 	Nodes        int     `json:"nodes"`
+	Clients      int     `json:"clients,omitempty"`
 	Duration     Time    `json:"duration"`
 	TickInterval Time    `json:"tick_interval"`
 	Profile      Profile `json:"profile"`
