@@ -51,7 +51,7 @@ func TestElectionUnderAllProfiles(t *testing.T) {
 	for _, p := range sim.Profiles {
 		for _, nodes := range []int{3, 5} {
 			t.Run(fmt.Sprintf("%s/%d-nodes", p.Name, nodes), func(t *testing.T) {
-				for seed := uint64(1); seed <= 40; seed++ {
+				for seed := uint64(1); seed <= seedCount(40); seed++ {
 					cfg := config(seed, p.Name, testOptions())
 					cfg.Nodes = nodes
 					if res := run(t, cfg); res.Violation != nil {
@@ -66,7 +66,7 @@ func TestElectionUnderAllProfiles(t *testing.T) {
 // With no faults a leader must be elected quickly: the first election
 // timeout is at most 200 ms, so 1 s leaves room for a split vote or two.
 func TestLeaderElectedQuicklyWhenCalm(t *testing.T) {
-	for seed := uint64(1); seed <= 100; seed++ {
+	for seed := uint64(1); seed <= seedCount(100); seed++ {
 		cfg := config(seed, "calm", testOptions())
 		cfg.Duration = 1 * sim.Second
 		cfg.Quiet = 0
@@ -79,7 +79,7 @@ func TestLeaderElectedQuicklyWhenCalm(t *testing.T) {
 
 func TestDeterminism(t *testing.T) {
 	for _, p := range sim.Profiles {
-		for seed := uint64(1); seed <= 10; seed++ {
+		for seed := uint64(1); seed <= seedCount(10); seed++ {
 			traces := make([][]byte, 2)
 			for i := range traces {
 				var buf bytes.Buffer
@@ -315,4 +315,16 @@ func TestLogInvariantsDetectViolations(t *testing.T) {
 			t.Fatal("two nodes applying different entries at index 2 not detected")
 		}
 	})
+}
+
+// seedCount is how many seeds a sweep test runs: n normally, a tenth of
+// that (at least one) with -short. CI runs the race-detector job with
+// -short, since the race detector slows the simulator several times over
+// while finding nothing in its single goroutine, and runs the full sweeps
+// in a separate job without it.
+func seedCount(n uint64) uint64 {
+	if testing.Short() {
+		return max(1, n/10)
+	}
+	return n
 }

@@ -26,7 +26,7 @@ func kvConfig(seed uint64, profile string, o Options) sim.Config {
 func TestKVLinearizableUnderAllProfiles(t *testing.T) {
 	for _, p := range sim.Profiles {
 		t.Run(p.Name, func(t *testing.T) {
-			for seed := uint64(1); seed <= 10; seed++ {
+			for seed := uint64(1); seed <= seedCount(10); seed++ {
 				if res := run(t, kvConfig(seed, p.Name, testOptions())); res.Violation != nil {
 					t.Fatalf("seed %d: %v", seed, res.Violation)
 				}

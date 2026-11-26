@@ -50,7 +50,7 @@ func firstDiff(a, b []byte) string {
 func TestDeterminism(t *testing.T) {
 	for _, p := range sim.Profiles {
 		t.Run(p.Name, func(t *testing.T) {
-			for seed := uint64(1); seed <= 40; seed++ {
+			for seed := uint64(1); seed <= seedCount(40); seed++ {
 				_, a := runTraced(t, toyConfig(seed, p, false))
 				_, b := runTraced(t, toyConfig(seed, p, false))
 				if !bytes.Equal(a, b) {
@@ -67,7 +67,7 @@ func TestDeterminism(t *testing.T) {
 func TestSeedsChangeTheRun(t *testing.T) {
 	p, _ := sim.ProfileByName("chaos")
 	seen := map[string]uint64{}
-	for seed := uint64(1); seed <= 20; seed++ {
+	for seed := uint64(1); seed <= seedCount(20); seed++ {
 		_, tr := runTraced(t, toyConfig(seed, p, false))
 		// Drop the header line, which contains the seed itself.
 		body := string(tr[bytes.IndexByte(tr, '\n')+1:])
@@ -82,7 +82,7 @@ func TestSeedsChangeTheRun(t *testing.T) {
 func TestToySurvivesAllProfiles(t *testing.T) {
 	for _, p := range sim.Profiles {
 		t.Run(p.Name, func(t *testing.T) {
-			for seed := uint64(1); seed <= 100; seed++ {
+			for seed := uint64(1); seed <= seedCount(100); seed++ {
 				res, err := sim.Run(toyConfig(seed, p, false))
 				if err != nil {
 					t.Fatal(err)
@@ -134,4 +134,16 @@ func TestFindsAndReplaysPlantedBug(t *testing.T) {
 	if res, _ := sim.Run(toyConfig(seed, p, false)); res.Violation != nil {
 		t.Fatalf("seed %d also fails with the bug fixed: %v", seed, res.Violation)
 	}
+}
+
+// seedCount is how many seeds a sweep test runs: n normally, a tenth of
+// that (at least one) with -short. CI runs the race-detector job with
+// -short, since the race detector slows the simulator several times over
+// while finding nothing in its single goroutine, and runs the full sweeps
+// in a separate job without it.
+func seedCount(n uint64) uint64 {
+	if testing.Short() {
+		return max(1, n/10)
+	}
+	return n
 }

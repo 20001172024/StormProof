@@ -26,8 +26,52 @@ jobs:
         with:
           version: v2.5.0
 
-      - name: unit tests (race detector)
-        run: go test -race ./...
+      # -short cuts the simulator's seed sweeps to a tenth: the race detector
+      # slows the single-goroutine simulator several times over without
+      # anything to find there. The full sweeps run in the jobs below.
+      - name: unit tests (race detector, short sweeps)
+        run: go test -race -short ./...
+
+  sim-tests:
+    # The simulator's tests with their full seed counts, without -race.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: simulator tests (full sweeps)
+        run: go test ./sim/... ./server/host/...
+
+  sim-sweep:
+    # At least 1,000 simulated seeds per push (CLAUDE.md section 8), with
+    # fixed and with changing membership. A failing seed's trace is uploaded
+    # so it can be replayed and inspected.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        mode:
+          - { name: fixed, flags: "" }
+          - { name: membership, flags: "-membership" }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: build simulator
+        run: go build -o bin/stormproof-sim ./sim/cmd/stormproof-sim
+      - name: 1,000 seeds, all fault profiles (${{ matrix.mode.name }})
+        run: bin/stormproof-sim -seeds 1000 -profile all ${{ matrix.mode.flags }} -trace-dir traces
+      - name: upload failing traces
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: failing-traces-${{ matrix.mode.name }}
+          path: traces/
+          if-no-files-found: ignore
 
   proto:
     # Generated code is committed so `go build` needs no protobuf toolchain.
