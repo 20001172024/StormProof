@@ -102,7 +102,7 @@ func TestCompact(t *testing.T) {
 }
 
 func TestRecoverFromSnapshot(t *testing.T) {
-	snap := &Snapshot{Index: 10, Term: 2, Data: []byte("s")}
+	snap := &Snapshot{Index: 10, Term: 2, Voters: []NodeID{1, 2, 3}, Data: []byte("s")}
 	n := newTestNodeWith(t, Config{
 		HardState: HardState{Term: 3}, Snapshot: snap,
 		Entries: []Entry{{Index: 11, Term: 3}, {Index: 12, Term: 3}},
@@ -127,7 +127,7 @@ func TestRecoverFromSnapshot(t *testing.T) {
 func TestHandleSnapshot(t *testing.T) {
 	snap := func(term Term, index uint64, snapTerm Term) Message {
 		return Message{Type: MsgSnap, From: 2, To: 1, Term: term,
-			Snapshot: &Snapshot{Index: index, Term: snapTerm, Data: []byte("state")}}
+			Snapshot: &Snapshot{Index: index, Term: snapTerm, Voters: []NodeID{1, 2, 3}, Data: []byte("state")}}
 	}
 	cases := []struct {
 		name       string
@@ -180,7 +180,7 @@ func TestHandleSnapshot(t *testing.T) {
 // AppendEntries reaching back into a follower's snapshot: the covered part
 // is skipped and the rest checked against the snapshot's last entry.
 func TestAppendEntriesOverlappingSnapshot(t *testing.T) {
-	n := newTestNodeWith(t, Config{HardState: HardState{Term: 2}, Snapshot: &Snapshot{Index: 5, Term: 2}})
+	n := newTestNodeWith(t, Config{HardState: HardState{Term: 2}, Snapshot: &Snapshot{Index: 5, Term: 2, Voters: []NodeID{1, 2, 3}}})
 	n.Step(appendMsg(2, 3, 1, 6, 2, 2, 2, 2)) // entries 4..7
 	msgs := drain(n)
 	if len(msgs) != 1 || !msgs[0].Success || msgs[0].MatchIndex != 7 {
