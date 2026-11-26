@@ -30,6 +30,7 @@ type recordType byte
 const (
 	recHardState recordType = 1
 	recEntries   recordType = 2
+	recSnapshot  recordType = 3 // the log now starts after a snapshot
 )
 
 var castagnoli = crc32.MakeTable(crc32.Castagnoli)
@@ -140,4 +141,19 @@ func decodeEntries(p []byte) ([]raft.Entry, error) {
 		return nil, ErrCorrupt
 	}
 	return es, nil
+}
+
+func encodeSnapshot(m SnapshotMeta) []byte {
+	b := binary.LittleEndian.AppendUint64(nil, m.Index)
+	return binary.LittleEndian.AppendUint64(b, uint64(m.Term))
+}
+
+func decodeSnapshot(p []byte) (SnapshotMeta, error) {
+	if len(p) != 16 {
+		return SnapshotMeta{}, ErrCorrupt
+	}
+	return SnapshotMeta{
+		Index: binary.LittleEndian.Uint64(p[0:8]),
+		Term:  raft.Term(binary.LittleEndian.Uint64(p[8:16])),
+	}, nil
 }

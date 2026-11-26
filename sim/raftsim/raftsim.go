@@ -12,12 +12,14 @@ package raftsim
 import (
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"maps"
 	"slices"
 
 	"github.com/20001172024/stormproof/kv"
 	"github.com/20001172024/stormproof/raft"
 	"github.com/20001172024/stormproof/sim"
+	"github.com/20001172024/stormproof/storage/snap"
 	"github.com/20001172024/stormproof/storage/wal"
 )
 
@@ -52,12 +54,21 @@ type Options struct {
 	// NoDedup switches off duplicate detection for retried writes.
 	LocalReads bool
 	NoDedup    bool
+
+	// SnapshotEvery takes a snapshot once this many entries have been
+	// applied since the last one; 0 never snapshots. The default, 50, is
+	// small on purpose, so that snapshots, compaction and InstallSnapshot
+	// happen many times in every run.
+	SnapshotEvery uint64
+	// SnapshotDropsSessions plants a bug: snapshots leave out the client
+	// sessions, so a node restored from one can apply a retried write twice.
+	SnapshotDropsSessions bool
 }
 
 // DefaultOptions: with a 10 ms tick, heartbeats every 10 ms, election
 // timeouts drawn from 100-200 ms, and a leader proposing on about one tick
 // in ten (about 10 commands per second).
-var DefaultOptions = Options{ElectionTicks: 10, HeartbeatTicks: 1, ProposeProb: 0.1}
+var DefaultOptions = Options{ElectionTicks: 10, HeartbeatTicks: 1, ProposeProb: 0.1, SnapshotEvery: 50}
 
 // New returns a factory for simulated Raft nodes.
 func New(o Options) sim.ProcessFactory {
@@ -82,7 +93,13 @@ type Process struct {
 	confirmed     []confirmedGet          // confirmed, waiting for the store to catch up
 	nextReadID    uint64
 	appliedIndex  uint64
-	out           []sim.Message // client responses waiting for handleReady
+	appliedTerm   raft.Term
+	snapshots     []raft.Snapshot // every snapshot taken or installed since this process started
+	// states records a hash of the whole store after each applied index
+	// (and after loading a snapshot), so invariants can check that every
+	// node's state machine is identical at the same index.
+	states []IndexedState
+	out    []sim.Message // client responses waiting for handleReady
 	// logVersion goes up whenever the log changes. Every change (append or
 	// truncation) reaches Ready.Entries, because it has to be persisted, so
 	// counting non-empty Ready.Entries catches them all. Invariants use it to
@@ -130,27 +147,44 @@ func open(env sim.Env, o Options) (*Process, error) {
 	for i, p := range env.Peers {
 		peers[i] = raft.NodeID(p)
 	}
-	node, err := raft.NewNode(raft.Config{
+	p := &Process{
+		env: env, opts: o, wal: w, store: kv.NewStore(),
+		pendingWrites: map[uint64]pendingWrite{}, pendingReads: map[uint64]pendingGet{},
+	}
+	// The WAL says which snapshot the log starts after; load it into the
+	// store. A missing or corrupt snapshot file is a recovery failure.
+	var snapshot *raft.Snapshot
+	if m := st.Snapshot; m.Index > 0 {
+		s, err := snap.Load(env.Disk, m.Index)
+		if err != nil {
+			return nil, err
+		}
+		if s.Term != m.Term {
+			return nil, fmt.Errorf("snapshot %d has term %d, the WAL says %d", m.Index, s.Term, m.Term)
+		}
+		if p.store, err = kv.Restore(s.Data); err != nil {
+			return nil, err
+		}
+		p.appliedIndex, p.appliedTerm = s.Index, s.Term
+		snapshot = &s
+		p.recordState()
+	}
+	p.store.SetTestingKnobs(kv.TestingKnobs{NoDedup: o.NoDedup, SnapshotDropsSessions: o.SnapshotDropsSessions})
+	p.node, err = raft.NewNode(raft.Config{
 		ID:             raft.NodeID(env.ID),
 		Peers:          peers,
 		ElectionTicks:  o.ElectionTicks,
 		HeartbeatTicks: o.HeartbeatTicks,
 		Rand:           env.Rand,
 		HardState:      st.HardState,
+		Snapshot:       snapshot,
 		Entries:        st.Entries,
 		Knobs:          o.Knobs,
 	})
 	if err != nil {
 		return nil, err
 	}
-	store := kv.NewStore()
-	if o.NoDedup {
-		store = kv.NewStoreWithoutDedup()
-	}
-	return &Process{
-		env: env, opts: o, node: node, wal: w, store: store,
-		pendingWrites: map[uint64]pendingWrite{}, pendingReads: map[uint64]pendingGet{},
-	}, nil
+	return p, nil
 }
 
 // Status returns the node's state, for invariants.
@@ -163,7 +197,30 @@ func (p *Process) Entries() []raft.Entry { return p.node.Entries() }
 func (p *Process) LogVersion() uint64 { return p.logVersion }
 
 // Applied returns the entries applied since this process started, in order.
+// Entries covered by a snapshot the process loaded are not in it.
 func (p *Process) Applied() []raft.Entry { return p.applied }
+
+// IndexedState is a hash of the store's full state after applying Index.
+type IndexedState struct {
+	Index uint64
+	Hash  uint64
+}
+
+// States returns the store's state hash after every index this process
+// applied or loaded.
+func (p *Process) States() []IndexedState { return p.states }
+
+func (p *Process) recordState() {
+	h := fnv.New64a()
+	_, _ = h.Write(p.store.Snapshot()) // hash.Hash.Write never fails
+	p.states = append(p.states, IndexedState{Index: p.appliedIndex, Hash: h.Sum64()})
+}
+
+// AppliedIndex is the index of the last entry reflected in the store.
+func (p *Process) AppliedIndex() uint64 { return p.appliedIndex }
+
+// Snapshots returns every snapshot this process took or installed.
+func (p *Process) Snapshots() []raft.Snapshot { return p.snapshots }
 
 // TraceState implements sim.Stater.
 func (p *Process) TraceState() any { return p.node.Status() }
@@ -256,7 +313,13 @@ func (p *Process) maybePropose() {
 // first, then release messages, then apply committed entries.
 func (p *Process) handleReady() ([]sim.Message, error) {
 	rd := p.node.Ready()
-	if rd.HardState != nil || len(rd.Entries) > 0 {
+	if rd.Snapshot != nil {
+		// A snapshot from the leader. Persisting it also persists the
+		// current HardState and whatever log remains after it.
+		if err := p.installSnapshot(*rd.Snapshot); err != nil {
+			return nil, err
+		}
+	} else if rd.HardState != nil || len(rd.Entries) > 0 {
 		if err := p.wal.Save(rd.HardState, rd.Entries); err != nil {
 			// Send nothing: the messages may depend on state that isn't
 			// durable. The simulator crashes the node.
@@ -281,6 +344,9 @@ func (p *Process) handleReady() ([]sim.Message, error) {
 		}
 	}
 	p.node.Advance()
+	if err := p.maybeSnapshot(); err != nil {
+		return nil, err
+	}
 	p.serveConfirmedReads()
 	if p.node.Status().Role != raft.Leader {
 		p.failPending()
@@ -293,8 +359,9 @@ func (p *Process) handleReady() ([]sim.Message, error) {
 // apply applies one committed entry to the store and answers the client
 // that proposed it, if this node is the one that did.
 func (p *Process) apply(e raft.Entry) {
-	p.appliedIndex = e.Index
+	p.appliedIndex, p.appliedTerm = e.Index, e.Term
 	if e.Data == nil {
+		p.recordState()
 		return // a leader's no-op
 	}
 	cmd, err := kv.Decode(e.Data)
@@ -304,6 +371,7 @@ func (p *Process) apply(e raft.Entry) {
 		panic(fmt.Sprintf("entry %d does not decode: %v", e.Index, err))
 	}
 	result := p.store.Apply(cmd)
+	p.recordState()
 	w, ok := p.pendingWrites[e.Index]
 	if !ok {
 		return
@@ -318,6 +386,70 @@ func (p *Process) apply(e raft.Entry) {
 		return
 	}
 	p.reply(w.client, w.requestID, statusOK, result)
+}
+
+func (p *Process) hardState() raft.HardState {
+	st := p.node.Status()
+	return raft.HardState{Term: st.Term, Vote: st.Vote}
+}
+
+// persistSnapshot makes a snapshot durable and compacts the WAL to start
+// after it, keeping the given entries. The snapshot file is written first:
+// until the WAL's compaction record is in place, recovery keeps using the
+// old WAL and simply ignores the new file.
+func (p *Process) persistSnapshot(s raft.Snapshot, after []raft.Entry) error {
+	sync := !p.opts.SkipSync
+	if err := snap.Save(p.env.Disk, s, sync); err != nil {
+		return err
+	}
+	if err := p.wal.Compact(wal.SnapshotMeta{Index: s.Index, Term: s.Term}, p.hardState(), after); err != nil {
+		return err
+	}
+	p.snapshots = append(p.snapshots, s)
+	p.logVersion++
+	return snap.Prune(p.env.Disk, s.Index)
+}
+
+// installSnapshot persists a snapshot received from the leader and loads it
+// into the store.
+func (p *Process) installSnapshot(s raft.Snapshot) error {
+	if err := p.persistSnapshot(s, p.node.Entries()); err != nil {
+		return err
+	}
+	store, err := kv.Restore(s.Data)
+	if err != nil {
+		// The leader made this snapshot with the same code, so this is a bug.
+		panic(fmt.Sprintf("snapshot %d from the leader does not decode: %v", s.Index, err))
+	}
+	store.SetTestingKnobs(kv.TestingKnobs{NoDedup: p.opts.NoDedup, SnapshotDropsSessions: p.opts.SnapshotDropsSessions})
+	p.store = store
+	p.appliedIndex, p.appliedTerm = s.Index, s.Term
+	p.recordState()
+	return nil
+}
+
+// maybeSnapshot takes a snapshot once SnapshotEvery entries have been
+// applied since the last one: save it, compact the WAL, then let the node
+// discard the entries it covers.
+func (p *Process) maybeSnapshot() error {
+	every := p.opts.SnapshotEvery
+	if every == 0 || p.appliedIndex < p.node.Status().SnapIndex+every {
+		return nil
+	}
+	s := raft.Snapshot{Index: p.appliedIndex, Term: p.appliedTerm, Data: p.store.Snapshot()}
+	var after []raft.Entry
+	for _, e := range p.node.Entries() {
+		if e.Index > s.Index {
+			after = append(after, e)
+		}
+	}
+	if err := p.persistSnapshot(s, after); err != nil {
+		return err
+	}
+	if _, err := p.node.Compact(s.Index, s.Data); err != nil {
+		panic(fmt.Sprintf("compacting to %d: %v", s.Index, err)) // a bug in this code
+	}
+	return nil
 }
 
 // serveConfirmedReads answers reads whose ReadIndex has been confirmed, once

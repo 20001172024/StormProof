@@ -9,10 +9,11 @@ type Store struct {
 	data     map[string][]byte
 	sessions map[uint64]session
 
-	// noDedup switches off duplicate detection. It is a planted bug for
-	// testing that the linearizability checker notices; never set it
-	// outside tests.
-	noDedup bool
+	// Planted bugs, for testing that the checkers notice; never set them
+	// outside tests. noDedup switches off duplicate detection;
+	// snapshotDropsSessions leaves the session table out of snapshots.
+	noDedup               bool
+	snapshotDropsSessions bool
 }
 
 // session is what the store remembers about one client: the last request it
@@ -36,6 +37,25 @@ func NewStore() *Store {
 func NewStoreWithoutDedup() *Store {
 	s := NewStore()
 	s.noDedup = true
+	return s
+}
+
+// TestingKnobs plant bugs in a store, for tests that check the checkers.
+type TestingKnobs struct {
+	NoDedup               bool // switch off duplicate detection
+	SnapshotDropsSessions bool // leave the session table out of snapshots
+}
+
+// SetTestingKnobs plants the given bugs. Never call it outside tests.
+func (s *Store) SetTestingKnobs(k TestingKnobs) {
+	s.noDedup, s.snapshotDropsSessions = k.NoDedup, k.SnapshotDropsSessions
+}
+
+// NewStoreWithBrokenSnapshots returns a store whose snapshots leave out the
+// client sessions. Only for tests that check the checker.
+func NewStoreWithBrokenSnapshots() *Store {
+	s := NewStore()
+	s.snapshotDropsSessions = true
 	return s
 }
 

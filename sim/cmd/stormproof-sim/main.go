@@ -14,8 +14,8 @@
 // settled and the clients' history is linearizable.
 //
 // -bug plants a known bug, to see the simulator find it: "fsync" (both node
-// kinds; -buggy is short for it), and for raft "dedup", "local-reads" and
-// "read-quorum".
+// kinds; -buggy is short for it), and for raft "dedup", "local-reads",
+// "read-quorum" and "snapshot-sessions".
 package main
 
 import (
@@ -90,7 +90,7 @@ func parseFlags(args []string, stderr io.Writer) (options, error) {
 	fl.StringVar(&o.trace, "trace", "", "with -seed: write the trace to this file")
 	fl.StringVar(&o.traceDir, "trace-dir", "", "without -seed: write a trace for each failing seed into this directory")
 	buggy := fl.Bool("buggy", false, `short for -bug fsync`)
-	fl.StringVar(&o.bug, "bug", "", `plant a bug: "fsync", or for raft "dedup", "local-reads", "read-quorum"`)
+	fl.StringVar(&o.bug, "bug", "", `plant a bug: "fsync", or for raft "dedup", "local-reads", "read-quorum", "snapshot-sessions"`)
 	fl.IntVar(&o.clients, "clients", raftsim.DefaultClients, "simulated KV clients (raft only)")
 	if err := fl.Parse(args); err != nil {
 		return o, err
@@ -103,7 +103,7 @@ func parseFlags(args []string, stderr io.Writer) (options, error) {
 	}
 	switch {
 	case o.bug == "" || o.bug == "fsync":
-	case o.node == "raft" && (o.bug == "dedup" || o.bug == "local-reads" || o.bug == "read-quorum"):
+	case o.node == "raft" && (o.bug == "dedup" || o.bug == "local-reads" || o.bug == "read-quorum" || o.bug == "snapshot-sessions"):
 	default:
 		return o, fmt.Errorf("unknown -bug %q for -node %s", o.bug, o.node)
 	}
@@ -154,6 +154,8 @@ func (o options) config(seed uint64, trace io.Writer) sim.Config {
 			ro.LocalReads = true
 		case "read-quorum":
 			ro.Knobs.ReadIndexWithoutQuorum = true
+		case "snapshot-sessions":
+			ro.SnapshotDropsSessions = true
 		}
 		co := raftsim.DefaultClientOptions
 		if o.quiet > 0 {

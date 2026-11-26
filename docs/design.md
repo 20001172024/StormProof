@@ -229,7 +229,9 @@ From M3:
   log of every leader of a later term. ("Later" matters: see
   [bug 003](bugs/003-leader-completeness-stale-leader.md).)
 - **State machine safety:** no two nodes apply different commands at the same
-  index.
+  index. Since M6a it also compares every node's whole store, by hash, after
+  each applied index, and requires snapshots at the same index to be
+  identical (section 12).
 
 The checks skip nodes whose log hasn't changed since the last event (every
 log change passes through `Ready.Entries`, so a counter there is enough),
@@ -389,7 +391,7 @@ log replaces everything from that index on, which is how a truncation is
 recorded. That is the `Ready.Entries` contract from M3, so there is no
 "truncate" record. The log is split into segment files `wal-<seq>.log`; a
 new segment's directory entry is fsynced before anything is written to it.
-Old segments are never deleted until snapshots (M6).
+Old segments are deleted by compaction after a snapshot (section 12).
 
 **Recovery.** Records are replayed in order. A record cut short at the end
 of the **last** segment is a torn tail: a crash during an append, whose
@@ -519,7 +521,90 @@ raised it to the numbers above and became the default.
 `TestReadIndexDeposedLeader` scripts the scenario step by step, as
 `TestFigure8` does, so the leadership check is covered deterministically.
 
-## 12. Real mode *(planned, M7)*
+## 12. Snapshots and log compaction (M6a)
+
+**The rules (Raft paper §7, Figure 13).** Each server snapshots on its own:
+the state machine's state after its last applied entry, plus that entry's
+index and term, after which the entries it covers are discarded. A
+follower that needs entries the leader has discarded gets the snapshot
+instead (InstallSnapshot). The receiver rejects an old term; if its log
+has the snapshot's last entry (same index and term) it keeps what follows,
+otherwise it throws the whole log away; either way its state machine is
+reset from the snapshot.
+
+**In the Raft node.** The log keeps the snapshot's last index and term, so
+the AppendEntries consistency check works for the first entry after it.
+`Compact(index, data)` discards entries the caller has applied and saved a
+snapshot of. A leader sends InstallSnapshot when a follower's `nextIndex`
+falls at or below its snapshot, resending it with each heartbeat until the
+follower answers, like AppendEntries. Two cases needed care:
+
+- A snapshot that arrives late, after the follower has already caught up
+  through the log, is ignored if its index is at or below the commit index.
+  Installing it would throw away newer entries.
+- AppendEntries that reach back into a follower's snapshot: the covered
+  part is committed, so it is skipped and the rest checked against the
+  snapshot's last entry.
+
+InstallSnapshot sends the whole snapshot in one message rather than in
+chunks. That is fine for the simulator's tiny state; a real deployment with
+large state would need chunking.
+
+**The KV snapshot** holds the data and the client sessions, written in
+sorted order so equal states give identical bytes. Without the sessions, a
+node restored from a snapshot would forget which requests it had applied
+and could apply a retried write twice. `Restore` accepts only that one
+canonical layout: fuzzing found it silently merging duplicate keys.
+
+**Storage.** A snapshot goes to its own file, `snap-<index>.snap` (CRC,
+written to a temp file, fsynced, renamed, directory fsynced). Then the WAL
+is compacted: a new segment holding a snapshot record, the HardState and
+the entries after the snapshot is written under a temp name, fsynced,
+renamed into place, the directory fsynced, and only then are older
+segments deleted. Recovery starts from the newest segment that begins with
+a snapshot record and loads the snapshot file it names; anything older is
+ignored, so a crash at any point leaves either the old state or the new.
+`TestCrashAtEveryStepOfCompact` crashes the disk at every single file
+system step inside `Compact` to check that; it caught a deliberately
+reversed step order that a test crashing only after `Compact` returned
+had missed.
+
+**In the simulator** a node snapshots every 50 applied entries, so in a
+15 s run snapshots, compaction and InstallSnapshot happen many times: in
+100 runs (20 per profile) the nodes ended up holding hundreds of snapshots
+between them, and InstallSnapshot was delivered thousands of times, most
+under `partitions`.
+
+**A stronger state machine safety check.** Planting a snapshot that drops
+the client sessions went unnoticed in 30 `flaky-net` seeds: the divergence
+it causes is only visible to clients if a retry happens at just the wrong
+moment, and snapshot files are only comparable if two nodes snapshot at
+the same index. So each node now also records a hash of its whole store
+after every applied index (and after loading a snapshot), and state
+machine safety requires every node's hash at the same index to match.
+
+**Results.** 1,000 seeds across all profiles, with 3 nodes and again with 5:
+no violations of any invariant, `Settled` or linearizability (52 s and
+1 min 53 s; faster than before snapshots, since logs stay short). Bugs
+planted to check the checks, 300 seeds each:
+
+| Planted bug | Seeds failing | Caught by |
+|---|---|---|
+| Snapshot leaves out client sessions | 82 | state machine safety (store hashes) |
+| Never send InstallSnapshot | 158 | mostly `Settled`: the cluster can't catch followers up |
+| WAL: delete old segments before the new one is in place | 5 | term goes backwards after a crash in that window |
+| Install a snapshot older than the commit index | 2 | end-of-run checks |
+| Always discard the log on InstallSnapshot (ignore rule 6) | 1 | end-of-run checks |
+| Don't skip AppendEntries entries covered by a snapshot | 0 | — |
+
+The last four are subtle, and random faults rarely line up to show them:
+they need a crash in a narrow window, or a snapshot to cross with log
+entries in flight. Each one is caught by a unit test instead
+(`TestCrashAtEveryStepOfCompact`, `TestHandleSnapshot`,
+`TestAppendEntriesOverlappingSnapshot`), which is why both kinds of test
+exist.
+
+## 13. Real mode *(planned, M7)*
 
 In real mode the `server` package plays the driver's role: a ticker goroutine
 calls `Tick` every tick interval, a gRPC handler calls `Step` for each

@@ -18,6 +18,13 @@ func (n *Node) broadcastAppend() {
 // ignores entries it already has (rule 4), so the repeats are harmless.
 func (n *Node) sendAppend(to NodeID) {
 	next := n.nextIndex[to]
+	if next <= n.log.snapIndex {
+		// The follower needs entries we have compacted away: send the
+		// snapshot instead (§7). It is resent with every heartbeat until the
+		// follower answers, like AppendEntries.
+		n.send(Message{Type: MsgSnap, To: to, Snapshot: n.snapshot, Context: n.readSeq})
+		return
+	}
 	prev := next - 1
 	prevTerm, _ := n.log.term(prev) // prev <= lastIndex, so it exists
 	n.send(Message{
@@ -45,6 +52,16 @@ func (n *Node) handleAppendEntries(m Message) {
 	// election and steps down (Figure 2, Candidates). Hearing from the leader
 	// also resets the election timer.
 	n.becomeFollower(m.Term, m.From)
+
+	// Entries up to our snapshot are committed, so they match the leader's
+	// (leader completeness); only what comes after can be checked or
+	// appended. Skip the part of the message the snapshot already covers,
+	// and check from the snapshot's last entry instead.
+	if m.PrevLogIndex < n.log.snapIndex {
+		skip := min(uint64(len(m.Entries)), n.log.snapIndex-m.PrevLogIndex)
+		m.Entries = m.Entries[skip:]
+		m.PrevLogIndex, m.PrevLogTerm = n.log.snapIndex, n.log.snapTerm
+	}
 
 	// Rule 2: "Reply false if log doesn't contain an entry at prevLogIndex
 	// whose term matches prevLogTerm (§5.3)." This consistency check is the
@@ -186,4 +203,42 @@ func (n *Node) maybeCommit() {
 		return
 	}
 	n.commitIndex = N
+}
+
+// handleSnapshot implements the InstallSnapshot receiver (Figure 13).
+func (n *Node) handleSnapshot(m Message) {
+	// Rule 1: "Reply immediately if term < currentTerm."
+	if m.Term < n.term {
+		n.send(Message{Type: MsgAppResp, To: m.From, Success: false, Context: m.Context})
+		return
+	}
+	n.becomeFollower(m.Term, m.From) // m.From leads our term
+	s := m.Snapshot
+	reply := func(match uint64) {
+		n.send(Message{Type: MsgAppResp, To: m.From, Success: true, MatchIndex: match, Context: m.Context})
+	}
+
+	// A snapshot we already have, or one that arrived late, after we had
+	// caught up through the log: everything it covers is committed here
+	// already. Ignore it. Installing it would throw away newer entries.
+	if s.Index <= n.commitIndex {
+		reply(n.commitIndex)
+		return
+	}
+
+	// Rules 6 and 7: "If existing log entry has same index and term as
+	// snapshot's last included entry, retain log entries following it and
+	// reply. Discard the entire log." Either way the state machine is reset
+	// from the snapshot (rule 8), and everything up to s.Index is committed.
+	if t, ok := n.log.term(s.Index); ok && t == s.Term {
+		n.log.compact(s.Index)
+	} else {
+		n.log.restore(s.Index, s.Term)
+	}
+	n.snapshot = s
+	n.newSnapshot = s
+	n.commitIndex = s.Index
+	n.applied = s.Index // the caller loads the snapshot instead of applying entries
+	n.unstable = n.log.lastIndex() + 1
+	reply(s.Index)
 }
