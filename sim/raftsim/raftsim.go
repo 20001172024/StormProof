@@ -63,6 +63,11 @@ type Options struct {
 	// SnapshotDropsSessions plants a bug: snapshots leave out the client
 	// sessions, so a node restored from one can apply a retried write twice.
 	SnapshotDropsSessions bool
+
+	// InitialVoters is how many servers (IDs 1..InitialVoters) form the
+	// initial configuration; the rest start with none and wait to be added.
+	// 0 means all servers.
+	InitialVoters int
 }
 
 // DefaultOptions: with a 10 ms tick, heartbeats every 10 ms, election
@@ -143,9 +148,18 @@ func open(env sim.Env, o Options) (*Process, error) {
 	if err != nil {
 		return nil, err
 	}
-	peers := make([]raft.NodeID, len(env.Peers))
-	for i, p := range env.Peers {
-		peers[i] = raft.NodeID(p)
+	initial := o.InitialVoters
+	if initial == 0 {
+		initial = len(env.Peers) + 1
+	}
+	var peers []raft.NodeID
+	joining := int(env.ID) > initial
+	if !joining {
+		for i := 1; i <= initial; i++ {
+			if sim.NodeID(i) != env.ID {
+				peers = append(peers, raft.NodeID(i))
+			}
+		}
 	}
 	p := &Process{
 		env: env, opts: o, wal: w, store: kv.NewStore(),
@@ -173,6 +187,7 @@ func open(env sim.Env, o Options) (*Process, error) {
 	p.node, err = raft.NewNode(raft.Config{
 		ID:             raft.NodeID(env.ID),
 		Peers:          peers,
+		Joining:        joining,
 		ElectionTicks:  o.ElectionTicks,
 		HeartbeatTicks: o.HeartbeatTicks,
 		Rand:           env.Rand,
@@ -238,11 +253,48 @@ func (p *Process) Step(m sim.Message) ([]sim.Message, error) {
 	case body:
 		p.node.Step(b.Message)
 	case clientRequest:
-		p.handleClient(m.From, b.Cmd)
+		p.handleClient(m.From, b.Cmd, b.Conf)
 	default:
 		return nil, fmt.Errorf("unexpected message %T", m.Body)
 	}
 	return p.handleReady()
+}
+
+// handleConfChange starts a membership change for the admin.
+func (p *Process) handleConfChange(from sim.NodeID, requestID uint64, cc raft.ConfChange) {
+	idx, err := p.node.ProposeConfChange(cc)
+	switch {
+	case errors.Is(err, raft.ErrNotLeader):
+		p.reply(from, requestID, statusNotLeader, kv.Result{})
+	case errors.Is(err, raft.ErrConfChangeInProgress), errors.Is(err, raft.ErrConfChangeNotReady):
+		p.reply(from, requestID, statusRetry, kv.Result{})
+	case err != nil:
+		// Nothing to do (already a voter, not a voter, last voter): answer
+		// with the configuration as it is.
+		p.out = append(p.out, sim.Message{To: from, Body: clientResponse{
+			RequestID: requestID, Status: statusOK, Voters: p.node.Status().Voters}})
+	default:
+		p.pendingWrites[idx] = pendingWrite{client: from, requestID: requestID, term: p.node.Status().Term}
+	}
+}
+
+// answerConfChange answers the admin once its configuration entry commits.
+func (p *Process) answerConfChange(e raft.Entry) {
+	w, ok := p.pendingWrites[e.Index]
+	if !ok {
+		return
+	}
+	delete(p.pendingWrites, e.Index)
+	if w.term != e.Term {
+		p.reply(w.client, w.requestID, statusRetry, kv.Result{})
+		return
+	}
+	voters, err := raft.DecodeVoters(e.Data)
+	if err != nil {
+		panic(fmt.Sprintf("configuration entry %d does not decode: %v", e.Index, err))
+	}
+	p.out = append(p.out, sim.Message{To: w.client, Body: clientResponse{
+		RequestID: w.requestID, Status: statusOK, Voters: voters}})
 }
 
 func (p *Process) reply(to sim.NodeID, requestID uint64, status string, r kv.Result) {
@@ -255,9 +307,13 @@ func (p *Process) reply(to sim.NodeID, requestID uint64, status string, r kv.Res
 
 // handleClient starts serving one client request. Only the leader serves
 // requests; others send the client to the leader they know of.
-func (p *Process) handleClient(from sim.NodeID, cmd kv.Command) {
+func (p *Process) handleClient(from sim.NodeID, cmd kv.Command, conf *raft.ConfChange) {
 	if p.node.Status().Role != raft.Leader {
 		p.reply(from, cmd.RequestID, statusNotLeader, kv.Result{})
+		return
+	}
+	if conf != nil {
+		p.handleConfChange(from, cmd.RequestID, *conf)
 		return
 	}
 	if cmd.Op == kv.OpGet {
@@ -360,6 +416,11 @@ func (p *Process) handleReady() ([]sim.Message, error) {
 // that proposed it, if this node is the one that did.
 func (p *Process) apply(e raft.Entry) {
 	p.appliedIndex, p.appliedTerm = e.Index, e.Term
+	if e.Type == raft.EntryConfChange {
+		p.recordState()
+		p.answerConfChange(e)
+		return
+	}
 	if e.Data == nil {
 		p.recordState()
 		return // a leader's no-op
