@@ -1,6 +1,7 @@
 package raftsim
 
 import (
+	"bytes"
 	"strings"
 	"testing"
 
@@ -114,5 +115,43 @@ func TestLocalReadsAreNotLinearizable(t *testing.T) {
 		if res == nil || !strings.Contains(res.Violation.Detail, "linearizab") {
 			t.Errorf("%s: got %v, want a linearizability violation within 50 chaos seeds", bug.name, res)
 		}
+	}
+}
+
+// Snapshots that leave out the client sessions make a node that restores
+// from one forget which requests it applied, so its state differs from the
+// others' at the same index. State machine safety, which compares every
+// node's whole store index by index, catches it.
+func TestSnapshotWithoutSessionsIsCaught(t *testing.T) {
+	o := testOptions()
+	o.SnapshotDropsSessions = true
+	res := findViolation(t, "chaos", o, 30)
+	if res == nil || res.Violation.Invariant != "state-machine-safety" {
+		t.Fatalf("got %v, want a state-machine-safety violation within 30 seeds", res)
+	}
+}
+
+// Snapshots, compaction and InstallSnapshot all really happen.
+func TestSnapshotsHappen(t *testing.T) {
+	var buf bytes.Buffer
+	cfg := kvConfig(1, "partitions", testOptions())
+	cfg.Trace = &buf
+	taken := 0
+	final := cfg.FinalCheck
+	cfg.FinalCheck = func(nodes []sim.NodeView) error {
+		for _, nv := range servers(nodes) {
+			taken += len(proc(nv).Snapshots())
+			if st := status(nv); st.SnapIndex == 0 {
+				t.Errorf("node %d never compacted its log", nv.ID)
+			}
+		}
+		return final(nodes)
+	}
+	if res := run(t, cfg); res.Violation != nil {
+		t.Fatal(res.Violation)
+	}
+	if taken == 0 || !bytes.Contains(buf.Bytes(), []byte(`"type":"deliver","from"`)) ||
+		!bytes.Contains(buf.Bytes(), []byte(`"kind":"InstallSnapshot"`)) {
+		t.Fatalf("snapshots taken: %d; InstallSnapshot in trace: %v", taken, bytes.Contains(buf.Bytes(), []byte("InstallSnapshot")))
 	}
 }

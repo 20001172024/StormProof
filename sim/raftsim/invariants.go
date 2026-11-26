@@ -19,7 +19,8 @@ func Invariants() []sim.Invariant {
 		&oneVotePerTerm{votes: map[voteKey]raft.NodeID{}},
 		&logMatching{seen: map[sim.NodeID]version{}},
 		&leaderCompleteness{seen: map[sim.NodeID]version{}},
-		&stateMachineSafety{seen: map[sim.NodeID]*Process{}, checked: map[sim.NodeID]int{}},
+		&stateMachineSafety{snaps: map[uint64][]byte{}, states: map[uint64]stateSeen{}, seen: map[sim.NodeID]*Process{},
+			checked: map[sim.NodeID]int{}, checkedSnaps: map[sim.NodeID]int{}, checkedState: map[sim.NodeID]int{}},
 	}
 }
 
@@ -162,11 +163,32 @@ func (o *oneVotePerTerm) Check(nodes []sim.NodeView) error {
 	return nil
 }
 
+// logView is one node's log as the invariants see it: the snapshot it
+// starts after, and the entries after that.
+type logView struct {
+	snapIndex uint64
+	snapTerm  raft.Term
+	entries   []raft.Entry
+}
+
+func viewOf(nv sim.NodeView) logView {
+	st := status(nv)
+	return logView{snapIndex: st.SnapIndex, snapTerm: st.SnapTerm, entries: proc(nv).Entries()}
+}
+
+func (l logView) first() uint64 { return l.snapIndex + 1 }
+func (l logView) last() uint64  { return l.snapIndex + uint64(len(l.entries)) }
+
+// at returns the entry at index i, which must be in [first, last].
+func (l logView) at(i uint64) raft.Entry { return l.entries[i-l.snapIndex-1] }
+
 // logMatching: "if two logs contain an entry with the same index and term,
 // then the logs are identical in all entries up through the given index"
-// (Figure 3). For each pair of running nodes it finds the highest index
-// where their terms agree and checks everything up to there is identical.
-// Pairs where neither log changed since the last check are skipped.
+// (Figure 3). For each pair of running nodes it looks at the indexes both
+// still hold (snapshots cut off the start), finds the highest one where
+// their terms agree, and checks everything both hold up to there is
+// identical. Pairs where neither log changed since the last check are
+// skipped.
 type logMatching struct {
 	seen map[sim.NodeID]version
 }
@@ -190,15 +212,15 @@ func (lm *logMatching) Check(nodes []sim.NodeView) error {
 			if !b.Up || (!changed[a.ID] && !changed[b.ID]) {
 				continue
 			}
-			la, lb := proc(a).Entries(), proc(b).Entries()
-			k := min(len(la), len(lb))
-			for k > 0 && la[k-1].Term != lb[k-1].Term {
+			la, lb := viewOf(a), viewOf(b)
+			lo, k := max(la.first(), lb.first()), min(la.last(), lb.last())
+			for k >= lo && la.at(k).Term != lb.at(k).Term {
 				k--
 			}
-			for j := 0; j < k; j++ {
-				if !sameEntry(la[j], lb[j]) {
+			for j := lo; j <= k && k >= lo; j++ {
+				if !sameEntry(la.at(j), lb.at(j)) {
 					return fmt.Errorf("nodes %d and %d agree on entry %d (term %d) but differ at entry %d: %v vs %v",
-						a.ID, b.ID, k, la[k-1].Term, j+1, la[j], lb[j])
+						a.ID, b.ID, k, la.at(k).Term, j, la.at(j), lb.at(j))
 				}
 			}
 		}
@@ -213,23 +235,45 @@ func (lm *logMatching) Check(nodes []sim.NodeView) error {
 // The checker keeps every entry any node has reported as committed, with
 // the term of the node that first reported it. A committed entry must never
 // change (that alone catches the Figure 8 failure), and every leader of a
-// later term must hold it.
+// later term must hold it, either in its log or covered by its snapshot.
 //
 // "Later" matters. A leader cut off by a partition can still believe it
 // leads an old term while the rest of the cluster commits entries in newer
 // terms. It doesn't have those entries, and Raft doesn't promise it will:
 // it can't commit anything, and it steps down as soon as it hears the new
 // term. (An earlier version of this checker required every current leader
-// to hold every committed entry, and flagged exactly that situation.)
+// to hold every committed entry, and flagged exactly that situation; see
+// docs/bugs/003.)
+//
+// Snapshots mean a node may report a commit index without still holding
+// all the entries up to it, so the record has gaps: known[i] says whether
+// entry i+1 has been seen.
 type leaderCompleteness struct {
-	committed  []raft.Entry // committed[i] is the committed entry at index i+1
-	reportedIn []raft.Term  // term of the node that first reported committed[i]
+	committed  []raft.Entry // committed[i] is the committed entry at index i+1, if known[i]
+	known      []bool
+	reportedIn []raft.Term // term of the node that first reported committed[i]
 	// seen skips nodes whose log, commit index and known-committed count
 	// are unchanged since they were last checked.
 	seen map[sim.NodeID]version
 }
 
 func (*leaderCompleteness) Name() string { return "leader-completeness" }
+
+func (c *leaderCompleteness) record(i uint64, e raft.Entry, term raft.Term) error {
+	for uint64(len(c.committed)) < i {
+		c.committed = append(c.committed, raft.Entry{})
+		c.known = append(c.known, false)
+		c.reportedIn = append(c.reportedIn, 0)
+	}
+	if !c.known[i-1] {
+		c.committed[i-1], c.known[i-1], c.reportedIn[i-1] = e, true, term
+		return nil
+	}
+	if prev := c.committed[i-1]; !sameEntry(prev, e) {
+		return fmt.Errorf("committed entry %d changed: was %v, now %v", i, prev, e)
+	}
+	return nil
+}
 
 func (c *leaderCompleteness) Check(nodes []sim.NodeView) error {
 	before := len(c.committed)
@@ -241,19 +285,18 @@ func (c *leaderCompleteness) Check(nodes []sim.NodeView) error {
 		if c.seen[nv.ID].p == v.p && c.seen[nv.ID].log == v.log && c.seen[nv.ID].commit == v.commit {
 			continue // nothing this node reports has changed
 		}
-		st, log := status(nv), proc(nv).Entries()
-		if st.Commit > uint64(len(log)) {
-			return fmt.Errorf("node %d has commit index %d but only %d entries: it deleted committed entries", nv.ID, st.Commit, len(log))
+		st, l := status(nv), viewOf(nv)
+		if st.Commit > l.last() {
+			return fmt.Errorf("node %d has commit index %d but its log ends at %d: it deleted committed entries", nv.ID, st.Commit, l.last())
 		}
-		for i := uint64(1); i <= st.Commit; i++ {
-			e := log[i-1]
-			if i <= uint64(len(c.committed)) {
-				if prev := c.committed[i-1]; !sameEntry(prev, e) {
-					return fmt.Errorf("committed entry %d changed: was %v, node %d now has %v committed", i, prev, nv.ID, e)
-				}
-			} else {
-				c.committed = append(c.committed, e)
-				c.reportedIn = append(c.reportedIn, st.Term)
+		if l.snapIndex > 0 && l.snapIndex <= uint64(len(c.committed)) && c.known[l.snapIndex-1] &&
+			c.committed[l.snapIndex-1].Term != l.snapTerm {
+			return fmt.Errorf("node %d has a snapshot up to %d in term %d, but entry %d was committed in term %d",
+				nv.ID, l.snapIndex, l.snapTerm, l.snapIndex, c.committed[l.snapIndex-1].Term)
+		}
+		for i := l.first(); i <= st.Commit; i++ {
+			if err := c.record(i, l.at(i), st.Term); err != nil {
+				return fmt.Errorf("node %d: %w", nv.ID, err)
 			}
 		}
 	}
@@ -270,16 +313,24 @@ func (c *leaderCompleteness) Check(nodes []sim.NodeView) error {
 		if c.seen[nv.ID] == v && len(c.committed) == before {
 			continue // same log, nothing newly committed: already checked
 		}
-		log := proc(nv).Entries()
+		l := viewOf(nv)
 		for i, want := range c.committed {
+			idx := uint64(i + 1)
 			// The entry was committed by a leader of a term no later than the
 			// reporting node's term, so leaders of any later term must have it.
-			if st.Term <= c.reportedIn[i] {
+			if !c.known[i] || st.Term <= c.reportedIn[i] || idx < l.snapIndex {
+				continue // (entries before the snapshot index are checked via its term below)
+			}
+			if idx == l.snapIndex {
+				if l.snapTerm != want.Term {
+					return fmt.Errorf("leader %d of term %d has a snapshot ending at %d in term %d; the committed entry there has term %d",
+						nv.ID, st.Term, idx, l.snapTerm, want.Term)
+				}
 				continue
 			}
-			if i >= len(log) || !sameEntry(log[i], want) {
+			if idx > l.last() || !sameEntry(l.at(idx), want) {
 				return fmt.Errorf("leader %d of term %d is missing entry %d %v, committed by term %d",
-					nv.ID, st.Term, i+1, want, c.reportedIn[i])
+					nv.ID, st.Term, idx, want, c.reportedIn[i])
 			}
 		}
 	}
@@ -296,13 +347,29 @@ func (c *leaderCompleteness) Check(nodes []sim.NodeView) error {
 // stateMachineSafety: "if a server has applied a log entry at a given
 // index to its state machine, no other server will ever apply a different
 // log entry for the same index" (Figure 3).
+//
+// Snapshots replace applying entries one by one, so this checks the result
+// directly too: after applying index i (or loading a snapshot ending at i),
+// every node's whole store must be identical, compared by hash. That catches
+// state that diverges without any client noticing, such as a snapshot that
+// loses part of the state. Every snapshot at a given index must also be
+// byte-for-byte the same on every node.
 type stateMachineSafety struct {
-	applied []raft.Entry // first entry applied at each index, by any node
-	// Only newly applied entries are checked each time: checked counts how
-	// many of each process's applied entries have been seen. A restarted
-	// node is a new process, which re-applies from the start.
-	seen    map[sim.NodeID]*Process
-	checked map[sim.NodeID]int
+	applied []raft.Entry // the first entry applied at each index, by any node
+	have    []bool
+	snaps   map[uint64][]byte // snapshot data by index
+	states  map[uint64]stateSeen
+	// Only new events are checked each time; a restarted node is a new
+	// process with its own history.
+	seen         map[sim.NodeID]*Process
+	checked      map[sim.NodeID]int
+	checkedSnaps map[sim.NodeID]int
+	checkedState map[sim.NodeID]int
+}
+
+type stateSeen struct {
+	hash uint64
+	node sim.NodeID
 }
 
 func (*stateMachineSafety) Name() string { return "state-machine-safety" }
@@ -314,52 +381,66 @@ func (s *stateMachineSafety) Check(nodes []sim.NodeView) error {
 		}
 		p := proc(nv)
 		if s.seen[nv.ID] != p {
-			s.seen[nv.ID], s.checked[nv.ID] = p, 0
+			s.seen[nv.ID], s.checked[nv.ID], s.checkedSnaps[nv.ID], s.checkedState[nv.ID] = p, 0, 0, 0
 		}
-		applied := p.Applied()
-		for j := s.checked[nv.ID]; j < len(applied); j++ {
-			e := applied[j]
-			if e.Index != uint64(j+1) {
-				return fmt.Errorf("node %d applied entry %d as its entry number %d: out of order", nv.ID, e.Index, j+1)
+		for _, st := range p.States()[s.checkedState[nv.ID]:] {
+			if prev, ok := s.states[st.Index]; ok && prev.hash != st.Hash {
+				return fmt.Errorf("node %d's store after index %d differs from node %d's", nv.ID, st.Index, prev.node)
 			}
-			if j < len(s.applied) {
+			s.states[st.Index] = stateSeen{st.Hash, nv.ID}
+		}
+		s.checkedState[nv.ID] = len(p.States())
+		for _, sn := range p.Snapshots()[s.checkedSnaps[nv.ID]:] {
+			if prev, ok := s.snaps[sn.Index]; ok && !bytes.Equal(prev, sn.Data) {
+				return fmt.Errorf("node %d has a different snapshot at index %d from another node's", nv.ID, sn.Index)
+			}
+			s.snaps[sn.Index] = sn.Data
+		}
+		s.checkedSnaps[nv.ID] = len(p.Snapshots())
+		for _, e := range p.Applied()[s.checked[nv.ID]:] {
+			for uint64(len(s.applied)) < e.Index {
+				s.applied = append(s.applied, raft.Entry{})
+				s.have = append(s.have, false)
+			}
+			if j := e.Index - 1; s.have[j] {
 				if !sameEntry(s.applied[j], e) {
-					return fmt.Errorf("node %d applied %v at index %d, but %v was applied there before", nv.ID, e, j+1, s.applied[j])
+					return fmt.Errorf("node %d applied %v at index %d, but %v was applied there before", nv.ID, e, e.Index, s.applied[j])
 				}
 			} else {
-				s.applied = append(s.applied, e)
+				s.applied[j], s.have[j] = e, true
 			}
 		}
-		s.checked[nv.ID] = len(applied)
+		s.checked[nv.ID] = len(p.Applied())
 	}
 	return nil
 }
 
 // Settled is the end-of-run liveness check, for after a quiet period with
 // the workload stopped: there is one stable leader (StableLeader), every
-// node's log is identical to the leader's and fully committed, and every
-// node has applied all of it.
+// node's log ends at the same entry as the leader's, everything in it is
+// committed, and every node has applied all of it.
 func Settled(nodes []sim.NodeView) error {
 	nodes = servers(nodes)
 	if err := StableLeader(nodes); err != nil {
 		return err
 	}
-	var leader []raft.Entry
+	var leader raft.Status
 	for _, nv := range nodes {
-		if status(nv).Role == raft.Leader {
-			leader = proc(nv).Entries()
+		if st := status(nv); st.Role == raft.Leader {
+			leader = st
 		}
 	}
 	for _, nv := range nodes {
-		st, log := status(nv), proc(nv).Entries()
-		if len(log) != len(leader) || (len(log) > 0 && !sameEntry(log[len(log)-1], leader[len(leader)-1])) {
-			return fmt.Errorf("node %d log (last index %d) differs from the leader's (last index %d)", nv.ID, len(log), len(leader))
+		st := status(nv)
+		if st.LastIndex != leader.LastIndex || st.LastTerm != leader.LastTerm {
+			return fmt.Errorf("node %d log ends at %d (term %d), the leader's at %d (term %d)",
+				nv.ID, st.LastIndex, st.LastTerm, leader.LastIndex, leader.LastTerm)
 		}
-		if st.Commit != uint64(len(log)) {
-			return fmt.Errorf("node %d committed %d of %d entries", nv.ID, st.Commit, len(log))
+		if st.Commit != st.LastIndex {
+			return fmt.Errorf("node %d committed %d of %d entries", nv.ID, st.Commit, st.LastIndex)
 		}
-		if n := len(proc(nv).Applied()); n != len(log) {
-			return fmt.Errorf("node %d applied %d of %d entries", nv.ID, n, len(log))
+		if a := proc(nv).AppliedIndex(); a != st.LastIndex {
+			return fmt.Errorf("node %d applied up to %d of %d", nv.ID, a, st.LastIndex)
 		}
 	}
 	return nil
