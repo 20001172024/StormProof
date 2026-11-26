@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/20001172024/stormproof/raft"
+	"github.com/20001172024/stormproof/server/host"
 	"github.com/20001172024/stormproof/sim"
 )
 
@@ -164,77 +165,25 @@ func TestLostVoteCausesTwoLeaders(t *testing.T) {
 	}
 }
 
-// State saved through the WAL, including a truncation, comes back after a
-// machine crash.
-func TestRecoveryThroughWAL(t *testing.T) {
-	disk := sim.NewDisk(sim.DiskConfig{}, sim.NewRand(1, "disk"))
-	env := sim.Env{ID: 1, Peers: []sim.NodeID{2, 3}, Disk: disk, Rand: sim.NewRand(1, "node"), Now: func() sim.Time { return 0 }}
-	p, err := open(env, DefaultOptions)
-	if err != nil {
-		t.Fatal(err)
-	}
-	hs := raft.HardState{Term: 7, Vote: 3}
-	es := []raft.Entry{{Index: 1, Term: 2}, {Index: 2, Term: 7, Data: []byte("x")}, {Index: 3, Term: 7, Data: []byte("y")}}
-	if err := p.wal.Save(&hs, es); err != nil {
-		t.Fatal(err)
-	}
-	// Replace the tail from index 2, as after a conflict with a new leader.
-	if err := p.wal.Save(nil, []raft.Entry{{Index: 2, Term: 8, Data: []byte("z")}}); err != nil {
-		t.Fatal(err)
-	}
-	disk.Crash(true)
-	p2, err := open(env, DefaultOptions)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if st := p2.Status(); st.Term != 7 || st.Vote != 3 {
-		t.Fatalf("recovered %+v, want term 7 vote 3", st)
-	}
-	want := []raft.Entry{{Index: 1, Term: 2}, {Index: 2, Term: 8, Data: []byte("z")}}
-	got := p2.Entries()
-	if len(got) != len(want) || !sameEntry(got[0], want[0]) || !sameEntry(got[1], want[1]) {
-		t.Fatalf("recovered log %+v, want %+v", got, want)
-	}
-}
-
-// A node whose WAL is corrupt refuses to start, which the simulator reports
-// as a recovery violation.
-func TestCorruptWALRefusesToStart(t *testing.T) {
-	disk := sim.NewDisk(sim.DiskConfig{}, sim.NewRand(1, "disk"))
-	// A complete record (length 17, so the bytes are all there) whose
-	// checksum is wrong.
-	f, _ := disk.Create("wal-0000000000000001.log")
-	_, _ = f.Write(append([]byte{17, 0, 0, 0, 0xde, 0xad, 0xbe, 0xef, 1}, make([]byte, 16)...))
-	_ = f.Sync()
-	_ = disk.SyncDir()
-	env := sim.Env{ID: 1, Peers: []sim.NodeID{2}, Disk: disk, Rand: sim.NewRand(1, "node")}
-	if _, err := open(env, DefaultOptions); err == nil {
-		t.Fatal("started from a corrupt WAL")
-	}
-}
-
 func TestInvariantsDetectViolations(t *testing.T) {
-	proc := func(st raft.Status) *Process {
+	proc := func(st raft.Status) *fakeServer {
 		// A node built from the given HardState; role is forced afterwards.
-		disk := sim.NewDisk(sim.DiskConfig{}, sim.NewRand(1, "disk"))
-		env := sim.Env{ID: sim.NodeID(st.ID), Peers: []sim.NodeID{9}, Disk: disk, Rand: sim.NewRand(1, "n")}
-		p, err := open(env, DefaultOptions)
-		if err != nil {
-			t.Fatal(err)
-		}
-		p.node, _ = raft.NewNode(raft.Config{
+		n, err := raft.NewNode(raft.Config{
 			ID: st.ID, Peers: []raft.NodeID{9}, ElectionTicks: 10, HeartbeatTicks: 1,
 			Rand: sim.NewRand(1, "n"), HardState: raft.HardState{Term: st.Term, Vote: st.Vote},
 		})
+		if err != nil {
+			t.Fatal(err)
+		}
 		if st.Role == raft.Leader {
-			for p.node.Status().Role != raft.Leader {
-				p.node.Tick()
-				p.node.Step(raft.Message{Type: raft.MsgVoteResp, From: 9, Term: p.node.Status().Term, VoteGranted: true})
+			for n.Status().Role != raft.Leader {
+				n.Tick()
+				n.Step(raft.Message{Type: raft.MsgVoteResp, From: 9, Term: n.Status().Term, VoteGranted: true})
 			}
 		}
-		return p
+		return &fakeServer{node: n}
 	}
-	view := func(id sim.NodeID, p *Process) sim.NodeView { return sim.NodeView{ID: id, Up: true, Process: p} }
+	view := func(id sim.NodeID, p *fakeServer) sim.NodeView { return sim.NodeView{ID: id, Up: true, Process: p} }
 	find := func(name string) sim.Invariant {
 		for _, inv := range Invariants() {
 			if inv.Name() == name {
@@ -275,9 +224,26 @@ func TestInvariantsDetectViolations(t *testing.T) {
 	})
 }
 
-// fakeProc builds a Process whose node has the given log and commit index,
-// for exercising invariants directly.
-func fakeProc(t *testing.T, id sim.NodeID, term raft.Term, log []raft.Entry, commitTo uint64) *Process {
+// fakeServer is a stand-in for a Process with a node of the test's
+// choosing, for exercising invariants directly.
+type fakeServer struct {
+	node    *raft.Node
+	applied []raft.Entry
+}
+
+func (f *fakeServer) Status() raft.Status                     { return f.node.Status() }
+func (f *fakeServer) Entries() []raft.Entry                   { return f.node.Entries() }
+func (f *fakeServer) LogVersion() uint64                      { return 0 }
+func (f *fakeServer) Applied() []raft.Entry                   { return f.applied }
+func (f *fakeServer) AppliedIndex() uint64                    { return 0 }
+func (f *fakeServer) Snapshots() []raft.Snapshot              { return nil }
+func (f *fakeServer) States() []host.IndexedState             { return nil }
+func (f *fakeServer) Tick() ([]sim.Message, error)            { return nil, nil }
+func (f *fakeServer) Step(sim.Message) ([]sim.Message, error) { return nil, nil }
+
+// fakeProc builds a fake server whose node has the given log and commit
+// index.
+func fakeProc(t *testing.T, id sim.NodeID, term raft.Term, log []raft.Entry, commitTo uint64) *fakeServer {
 	t.Helper()
 	n, err := raft.NewNode(raft.Config{
 		ID: raft.NodeID(id), Peers: []raft.NodeID{99}, ElectionTicks: 10, HeartbeatTicks: 1,
@@ -292,7 +258,7 @@ func fakeProc(t *testing.T, id sim.NodeID, term raft.Term, log []raft.Entry, com
 			PrevLogIndex: commitTo, PrevLogTerm: log[commitTo-1].Term, LeaderCommit: commitTo})
 		n.Advance()
 	}
-	return &Process{node: n}
+	return &fakeServer{node: n}
 }
 
 func e(i uint64, t raft.Term, data string) raft.Entry {
@@ -309,7 +275,7 @@ func TestLogInvariantsDetectViolations(t *testing.T) {
 		t.Fatalf("no invariant %q", name)
 		return nil
 	}
-	up := func(id sim.NodeID, p *Process) sim.NodeView { return sim.NodeView{ID: id, Up: true, Process: p} }
+	up := func(id sim.NodeID, p sim.Process) sim.NodeView { return sim.NodeView{ID: id, Up: true, Process: p} }
 
 	t.Run("log matching", func(t *testing.T) {
 		inv := find("log-matching")

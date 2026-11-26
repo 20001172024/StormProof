@@ -1,0 +1,63 @@
+syntax = "proto3";
+
+// Node-to-node Raft messages in real mode. These mirror raft.Message in Go
+// field for field; package transport converts between the two. The Raft
+// state machine itself never sees protobuf types.
+package stormproof.raft.v1;
+
+option go_package = "github.com/20001172024/stormproof/proto/stormproof/raft/v1;raftv1";
+
+// RaftService carries Raft messages between servers. A Send delivers a
+// batch of messages for the receiving server; there is no reply beyond the
+// acknowledgement, since Raft's own responses are just more messages. A
+// lost batch is fine: Raft resends what matters.
+service RaftService {
+  rpc Send(SendRequest) returns (SendResponse);
+}
+
+message SendRequest {
+  repeated Message messages = 1;
+}
+
+message SendResponse {}
+
+// Entry mirrors raft.Entry. type is raft.EntryType (0 normal, 1 configuration).
+message Entry {
+  uint64 index = 1;
+  uint64 term = 2;
+  uint32 type = 3;
+  bytes data = 4;
+}
+
+// Snapshot mirrors raft.Snapshot.
+message Snapshot {
+  uint64 index = 1;
+  uint64 term = 2;
+  repeated uint64 voters = 3;
+  bytes data = 4;
+}
+
+// Message mirrors raft.Message. type is raft.MessageType.
+message Message {
+  uint32 type = 1;
+  uint64 from = 2;
+  uint64 to = 3;
+  uint64 term = 4;
+
+  uint64 last_log_index = 5;
+  uint64 last_log_term = 6;
+  bool vote_granted = 7;
+
+  uint64 prev_log_index = 8;
+  uint64 prev_log_term = 9;
+  repeated Entry entries = 10;
+  uint64 leader_commit = 11;
+
+  bool success = 12;
+  uint64 match_index = 13;
+  uint64 conflict_term = 14;
+  uint64 conflict_index = 15;
+
+  Snapshot snapshot = 16;
+  uint64 context = 17;
+}

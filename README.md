@@ -11,9 +11,9 @@ visualizer** for replaying failures step by step.
 > foundation (M1), Raft leader election (M2), log replication (M3), a
 > crash-safe write-ahead log (M4), the KV store with sessions, ReadIndex
 > reads and Porcupine linearizability checking (M5), snapshots with log
-> compaction (M6a) and single-server membership changes (M6b), all in the
-> simulator. Nothing runs outside the simulator yet: the gRPC server, real
-> mode, comes next in M7.
+> compaction (M6a) and single-server membership changes (M6b), all tested
+> in the simulator; and real mode (M7a): the same server code running over
+> gRPC with a CLI. Metrics and docker-compose (M7b) are next.
 
 ## Why it's built this way
 
@@ -31,8 +31,8 @@ replayed exactly. See [docs/design.md](docs/design.md).
 | `kv/` | Key-value state machine, client sessions, dedup |
 | `storage/` | File-system interface (real and simulated), the write-ahead log (`storage/wal`) and snapshot files (`storage/snap`) |
 | `transport/` | gRPC transport between nodes |
-| `server/` | Node binary wiring everything together |
-| `client/` | Go client library and CLI |
+| `server/` | The real server: `server/host` (shared with the simulator), the gRPC event loop, and the `stormproof-server` binary |
+| `client/` | Go client library and the `stormproof-cli` command |
 | `sim/` | Simulator: event loop, fake clock/network/disk, faults, invariants, traces |
 | `check/` | Linearizability checking: a Porcupine model of the KV store |
 | `proto/` | Protocol Buffers definitions |
@@ -46,6 +46,20 @@ Requires Go 1.24+ and golangci-lint v2.
 make test   # go test -race ./...
 make lint   # golangci-lint run ./...
 make proto  # regenerate Go code from proto/ (installs pinned buf into ./bin)
+```
+
+Run a real three-server cluster on one machine:
+
+```bash
+go build -o bin/ ./server/cmd/stormproof-server ./client/cmd/stormproof-cli
+C=1=localhost:7001,2=localhost:7002,3=localhost:7003
+bin/stormproof-server -id 1 -cluster $C -data /tmp/sp1 &
+bin/stormproof-server -id 2 -cluster $C -data /tmp/sp2 &
+bin/stormproof-server -id 3 -cluster $C -data /tmp/sp3 &
+export STORMPROOF_ENDPOINTS=localhost:7001,localhost:7002,localhost:7003
+bin/stormproof-cli put greeting hello
+bin/stormproof-cli get greeting
+bin/stormproof-cli cas greeting hello hi
 ```
 
 Run the simulator:

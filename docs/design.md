@@ -679,10 +679,68 @@ entry is overwritten, and two majorities commit different entries at the
 same index. All seven membership rules were also checked by planting each
 bug and confirming a unit test fails.
 
-## 14. Real mode *(planned, M7)*
+## 14. Real mode (M7a)
 
-In real mode the `server` package plays the driver's role: a ticker goroutine
-calls `Tick` every tick interval, a gRPC handler calls `Step` for each
-incoming message, and a single loop goroutine owns the `raft` node and
-serializes all calls into it. The concurrency lives in the driver, never in
-`raft`, which is why `raft` needs no locks.
+**One code path for both modes.** The glue between the pure Raft node and
+the world (persist via the WAL and snapshot files, release messages, apply
+committed entries, answer clients, take and install snapshots) lives in
+`server/host`. The simulator wraps a `host.Host` in a `sim.Process`; the
+real server wraps the same `host.Host` with goroutines, gRPC and real
+files. Everything the simulator found and checked applies to the code that
+runs for real. Moving the code out of `sim/raftsim` changed no behaviour:
+the 1,000-seed sweeps (fixed and changing membership) still had no
+failures and every planted bug was still caught at about the same rate.
+A back-to-back timing found the move about 10% slower (40-43 s against
+37 s for 300 seeds), plausibly from building output slices per call.
+
+**Concurrency.** The Host is as single-threaded in production as in the
+simulator: one goroutine, `Server.run`, owns it and is the only one that
+touches it. A `select` loop takes one event at a time from a ticker,
+incoming Raft messages (from the RaftService) and client calls (from the KV
+service), calls the Host, then hands Raft messages to the transport and
+responses to the client calls waiting for them. gRPC handlers never touch
+Raft state; they send a request into the loop on a channel and wait on a
+reply channel, which is buffered so the loop never blocks delivering.
+
+**Transport.** `raft.proto` mirrors `raft.Message` field for field. Each
+peer has a bounded queue and a sender goroutine that sends in batches; when
+a queue is full the message is dropped and counted. Raft already copes
+with lost messages, and this way a dead or slow peer can never hold up the
+leader or the other peers. Incoming messages go into the loop's inbox, also
+dropped if it is full.
+
+**Timing.** A tick is 50 ms by default, heartbeats every tick and election
+timeouts 10-20 ticks (0.5-1 s). The simulator's 10 ms tick works in virtual
+time; over a real network, the heartbeat must stay well below the election
+timeout even with jitter and GC pauses, or followers start needless
+elections. (etcd's defaults are in the same range: 100 ms heartbeat, 1 s
+election timeout.)
+
+**Client protocol.** A non-leader answers `FailedPrecondition` with the
+leader's address in the `stormproof-leader-addr` trailer; the client goes
+straight there. An unknown outcome (the leader lost leadership before the
+entry committed, or a timeout) is `Unavailable`, and the client retries
+with the same request ID, which deduplication makes safe. The Go client
+runs one operation at a time: the server keeps only the newest request per
+client, so with two in flight an older one applied later would be taken for
+a duplicate. Concurrent callers should use separate clients.
+
+**What was checked, on real processes** (localhost, real gRPC, files and
+time; tests use 10 ms ticks):
+
+- `server` tests run three servers in one process: all operations, leader
+  failover (first write after stopping the leader succeeded 160-320 ms
+  later across runs), a full stop and restart recovered from disk
+  including a snapshot, and four concurrent clients across a leader stop and
+  restart whose history of 1,973 operations Porcupine found linearizable.
+  The suite passed six times in a row with the race detector, which on the
+  first run caught a data race in `Server.Start` (an unlocked read of the
+  status the loop updates).
+- By hand, with three `stormproof-server` processes and `stormproof-cli`
+  (50 ms ticks): every CLI command worked; after `kill -9` of the leader the
+  next write succeeded 526 ms later; the restarted server recovered from
+  disk and served the write made while it was down.
+
+**Not yet in real mode.** Membership changes (they need a way to learn a new
+server's address; planned with Kubernetes in M11); metrics and
+docker-compose (M7b); TLS or authentication.
