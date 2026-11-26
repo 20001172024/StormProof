@@ -9,10 +9,10 @@ visualizer** for replaying failures step by step.
 
 > **Status:** early development. Done: project setup (M0), the simulator
 > foundation (M1), Raft leader election (M2), log replication (M3), a
-> crash-safe write-ahead log (M4), and the KV store with sessions,
-> ReadIndex reads and Porcupine linearizability checking (M5), all in the
-> simulator. Snapshots and membership changes (M6) are next. Nothing runs
-> outside the simulator yet: the gRPC server comes in M7.
+> crash-safe write-ahead log (M4), the KV store with sessions, ReadIndex
+> reads and Porcupine linearizability checking (M5), and snapshots with log
+> compaction (M6a), all in the simulator. Membership changes (M6b) are
+> next. Nothing runs outside the simulator yet: the gRPC server comes in M7.
 
 ## Why it's built this way
 
@@ -28,7 +28,7 @@ replayed exactly. See [docs/design.md](docs/design.md).
 |---|---|
 | `raft/` | Deterministic Raft state machine (no I/O) |
 | `kv/` | Key-value state machine, client sessions, dedup |
-| `storage/` | File-system interface (real and simulated) and the write-ahead log (`storage/wal`) |
+| `storage/` | File-system interface (real and simulated), the write-ahead log (`storage/wal`) and snapshot files (`storage/snap`) |
 | `transport/` | gRPC transport between nodes |
 | `server/` | Node binary wiring everything together |
 | `client/` | Go client library and CLI |
