@@ -18,8 +18,12 @@ var ErrReadNotReady = errors.New("raft: leader has not committed an entry in its
 
 // Config configures a node.
 type Config struct {
-	ID    NodeID
-	Peers []NodeID // every other node in the cluster
+	ID NodeID
+	// Peers is the other voters in the initial configuration. A server
+	// joining an existing cluster sets Joining instead: it starts with no
+	// configuration and learns it from the leader.
+	Peers   []NodeID
+	Joining bool
 
 	// ElectionTicks is the base election timeout. Each time the timer is
 	// reset a new timeout is drawn at random from
@@ -61,6 +65,17 @@ type TestingKnobs struct {
 	// its term. The no-op is what normally lets entries from earlier terms
 	// commit promptly; without it they wait for the next client command.
 	NoNoopOnElection bool
+	// ConfChangeBeforeOwnTermCommit lets a leader start a membership change
+	// before it has committed an entry in its own term: the 2015 bug in
+	// single-server changes, which can elect two leaders.
+	ConfChangeBeforeOwnTermCommit bool
+	// ConcurrentConfChanges lets a leader start a membership change while
+	// an earlier one is still uncommitted.
+	ConcurrentConfChanges bool
+	// NoVoteStickiness makes servers grant votes even when they have heard
+	// from a current leader recently, so removed servers can disrupt the
+	// cluster (§4.2.3).
+	NoVoteStickiness bool
 	// ReadIndexWithoutQuorum confirms ReadIndex requests straight away
 	// instead of waiting for a majority to acknowledge this node as leader.
 	// A leader that has been replaced without knowing it then serves stale
@@ -74,6 +89,10 @@ func (c Config) validate() error {
 		return errors.New("raft: ID must not be 0")
 	case slices.Contains(c.Peers, c.ID):
 		return errors.New("raft: Peers must not include the node itself")
+	case c.Joining && len(c.Peers) > 0:
+		return errors.New("raft: a joining server has no initial Peers")
+	case c.Snapshot != nil && len(c.Snapshot.Voters) == 0 && !c.Joining:
+		return errors.New("raft: a snapshot must carry its configuration")
 	case c.ElectionTicks <= 0 || c.HeartbeatTicks <= 0:
 		return errors.New("raft: ElectionTicks and HeartbeatTicks must be positive")
 	case c.HeartbeatTicks >= c.ElectionTicks:
@@ -103,9 +122,16 @@ func (c Config) validate() error {
 // and hands its work back through Ready. All methods must be called from
 // one goroutine.
 type Node struct {
-	id    NodeID
-	peers []NodeID
-	cfg   Config
+	id  NodeID
+	cfg Config
+
+	// Configuration (membership.go). voters is the current configuration,
+	// sorted; confIndex is the index of the entry that set it, or 0 if it
+	// comes from baseVoters: the configuration in the latest snapshot, or
+	// the initial one.
+	voters     []NodeID
+	baseVoters []NodeID
+	confIndex  uint64
 
 	// Persistent state (Figure 2). HardState is saved via Ready.HardState,
 	// the log via Ready.Entries.
@@ -174,23 +200,27 @@ func NewNode(cfg Config) (*Node, error) {
 	}
 	n := &Node{
 		id:        cfg.ID,
-		peers:     slices.Clone(cfg.Peers),
 		cfg:       cfg,
 		term:      cfg.HardState.Term,
 		vote:      cfg.HardState.Vote,
 		savedHard: cfg.HardState,
 	}
+	if !cfg.Joining {
+		n.baseVoters = append(slices.Clone(cfg.Peers), cfg.ID)
+		slices.Sort(n.baseVoters) // fixed order, so messages always go out in the same order
+	}
 	if s := cfg.Snapshot; s != nil {
 		n.log.restore(s.Index, s.Term)
 		n.snapshot = s
+		n.baseVoters = slices.Clone(s.Voters)
 		// A snapshot only ever holds committed entries, and the caller has
 		// loaded it into its state machine.
 		n.commitIndex, n.applied = s.Index, s.Index
 	}
 	n.log.entries = slices.Clone(cfg.Entries)
 	n.unstable = n.log.lastIndex() + 1 // recovered entries are already durable
-	slices.Sort(n.peers)               // fixed order, so messages always go out in the same order
 	n.role = Follower
+	n.refreshConfig()
 	n.resetElectionTimer()
 	return n, nil
 }
@@ -207,10 +237,15 @@ func (n *Node) Tick() {
 	}
 	// Figure 2, Followers and Candidates: if the election timeout elapses
 	// without hearing from a current leader or granting a vote, start an
-	// election.
+	// election. Only voters do: a server outside the configuration (new and
+	// not yet added, or removed) can't win and would only disrupt.
 	n.electionElapsed++
 	if n.electionElapsed >= n.electionTimeout {
-		n.campaign()
+		if n.isVoter(n.id) {
+			n.campaign()
+		} else {
+			n.resetElectionTimer()
+		}
 	}
 }
 
@@ -225,7 +260,9 @@ func (n *Node) Propose(data []byte) (uint64, error) {
 	e := Entry{Index: n.log.lastIndex() + 1, Term: n.term, Data: data}
 	n.log.append(e)
 	n.maybeCommit() // a one-node cluster commits straight away
-	n.broadcastAppend()
+	if n.role == Leader {
+		n.broadcastAppend()
+	}
 	return e.Index, nil
 }
 
@@ -252,7 +289,7 @@ func (n *Node) ReadIndex(id uint64) error {
 		return ErrReadNotReady
 	}
 	rs := ReadState{ID: id, Index: n.commitIndex}
-	if n.quorum() == 1 || n.cfg.Knobs.ReadIndexWithoutQuorum {
+	if (n.quorum() == 1 && n.isVoter(n.id)) || n.cfg.Knobs.ReadIndexWithoutQuorum {
 		n.readStates = append(n.readStates, rs)
 		return nil
 	}
@@ -275,7 +312,7 @@ func (n *Node) ackRead(from NodeID, ctx uint64) {
 			p.acks[from] = true
 		}
 	}
-	for len(n.pendingReads) > 0 && len(n.pendingReads[0].acks) >= n.quorum() {
+	for len(n.pendingReads) > 0 && n.countVoters(n.pendingReads[0].acks) >= n.quorum() {
 		n.readStates = append(n.readStates, n.pendingReads[0].ReadState)
 		n.pendingReads = n.pendingReads[1:]
 	}
@@ -283,6 +320,16 @@ func (n *Node) ackRead(from NodeID, ctx uint64) {
 
 // Step processes one incoming message.
 func (n *Node) Step(m Message) {
+	// §4.2.3: a server that has heard from a current leader within the
+	// minimum election timeout ignores RequestVote, without even adopting
+	// its term. Otherwise a removed server, which never hears it was removed
+	// and keeps timing out, would depose a perfectly healthy leader. (A
+	// leader counts itself as a current leader.)
+	if m.Type == MsgVote && m.Term > n.term && n.leader != None &&
+		n.electionElapsed < n.cfg.ElectionTicks && !n.cfg.Knobs.NoVoteStickiness {
+		return
+	}
+
 	// Figure 2, All Servers: "If RPC request or response contains term
 	// T > currentTerm: set currentTerm = T, convert to follower (§5.1)."
 	// Doing this first, for every message type, means the handlers below
@@ -345,6 +392,7 @@ func (n *Node) Status() Status {
 		ID: n.id, Role: n.role, Term: n.term, Vote: n.vote, Leader: n.leader,
 		LastIndex: n.log.lastIndex(), LastTerm: n.log.lastTerm(), Commit: n.commitIndex,
 		SnapIndex: n.log.snapIndex, SnapTerm: n.log.snapTerm,
+		Voters: slices.Clone(n.voters),
 	}
 }
 
@@ -371,8 +419,11 @@ func (n *Node) Compact(index uint64, data []byte) (Snapshot, error) {
 		return Snapshot{}, ErrUnapplied
 	}
 	t, _ := n.log.term(index)
+	voters := slices.Clone(n.configAt(index))
 	n.log.compact(index)
-	n.snapshot = &Snapshot{Index: index, Term: t, Data: data}
+	n.baseVoters = voters // the configuration entries up to index are gone
+	n.refreshConfig()
+	n.snapshot = &Snapshot{Index: index, Term: t, Voters: voters, Data: data}
 	n.unstable = max(n.unstable, n.log.firstIndex())
 	return *n.snapshot, nil
 }
@@ -409,9 +460,9 @@ func (n *Node) becomeLeader() {
 
 	// Figure 2, volatile state on leaders: "nextIndex: initialized to leader
 	// last log index + 1; matchIndex: initialized to 0".
-	n.nextIndex = make(map[NodeID]uint64, len(n.peers))
-	n.matchIndex = make(map[NodeID]uint64, len(n.peers))
-	for _, p := range n.peers {
+	n.nextIndex = map[NodeID]uint64{}
+	n.matchIndex = map[NodeID]uint64{}
+	for _, p := range n.others() {
 		n.nextIndex[p] = n.log.lastIndex() + 1
 		n.matchIndex[p] = 0
 	}
@@ -424,6 +475,9 @@ func (n *Node) becomeLeader() {
 		n.log.append(Entry{Index: n.log.lastIndex() + 1, Term: n.term})
 	}
 	n.maybeCommit() // a one-node cluster commits straight away
+	if n.role != Leader {
+		return
+	}
 
 	// Figure 2, Leaders: "Upon election: send initial empty AppendEntries
 	// RPCs (heartbeat) to each server". Ours carry the no-op.
@@ -436,10 +490,6 @@ func (n *Node) resetElectionTimer() {
 	n.electionElapsed = 0
 	n.electionTimeout = n.cfg.ElectionTicks + n.cfg.Rand.Intn(n.cfg.ElectionTicks)
 }
-
-// quorum is the number of nodes that make a majority of the whole cluster,
-// this node included.
-func (n *Node) quorum() int { return (len(n.peers)+1)/2 + 1 }
 
 // send queues a message from this node, stamped with the current term.
 func (n *Node) send(m Message) {

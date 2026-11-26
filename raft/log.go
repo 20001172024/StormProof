@@ -3,10 +3,21 @@ package raft
 // Entry is one entry in the replicated log (§5.3). Index starts at 1.
 // An entry with no Data is a no-op, appended by each new leader.
 type Entry struct {
-	Index uint64 `json:"index"`
-	Term  Term   `json:"term"`
-	Data  []byte `json:"data,omitempty"`
+	Index uint64    `json:"index"`
+	Term  Term      `json:"term"`
+	Type  EntryType `json:"type,omitempty"`
+	Data  []byte    `json:"data,omitempty"`
 }
+
+// EntryType says what an entry's Data means.
+type EntryType uint8
+
+const (
+	// EntryNormal holds a command for the application's state machine.
+	EntryNormal EntryType = iota
+	// EntryConfChange holds a new cluster configuration (see membership.go).
+	EntryConfChange
+)
 
 // raftLog is the in-memory log, after the latest snapshot.
 //

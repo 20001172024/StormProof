@@ -5,13 +5,15 @@ import (
 
 	"github.com/20001172024/stormproof/check"
 	"github.com/20001172024/stormproof/kv"
+	"github.com/20001172024/stormproof/raft"
 	"github.com/20001172024/stormproof/sim"
 )
 
 // Messages between clients and servers.
 
 type clientRequest struct {
-	Cmd kv.Command `json:"cmd"`
+	Cmd  kv.Command       `json:"cmd"`
+	Conf *raft.ConfChange `json:"conf,omitempty"` // a membership change from the admin, instead of a KV command
 }
 
 func (clientRequest) Kind() string { return "ClientRequest" }
@@ -24,10 +26,11 @@ const (
 )
 
 type clientResponse struct {
-	RequestID uint64     `json:"request"`
-	Status    string     `json:"status"`
-	Leader    sim.NodeID `json:"leader,omitempty"`
-	Result    kv.Result  `json:"result"`
+	RequestID uint64        `json:"request"`
+	Status    string        `json:"status"`
+	Leader    sim.NodeID    `json:"leader,omitempty"`
+	Result    kv.Result     `json:"result"`
+	Voters    []raft.NodeID `json:"voters,omitempty"` // the configuration, in answer to a membership change
 }
 
 func (clientResponse) Kind() string { return "ClientResponse" }
@@ -54,6 +57,19 @@ var DefaultClientOptions = ClientOptions{Keys: 2, OpProb: 0.2, Timeout: 300 * si
 // DefaultClients is the number of simulated clients used by tests and the
 // CLI.
 const DefaultClients = 6
+
+// NewClients returns a factory for the simulated clients: the first client
+// is the admin if admin is non-nil (initialVoters says what configuration
+// it should assume at the start), and the rest are KV clients.
+func NewClients(co ClientOptions, admin *AdminOptions, initialVoters int) sim.ProcessFactory {
+	kvClient := NewClient(co)
+	return func(env sim.Env) (sim.Process, error) {
+		if admin != nil && int(env.ID) == len(env.Peers)+1 {
+			return newAdmin(env, *admin, initialVoters), nil
+		}
+		return kvClient(env)
+	}
+}
 
 // NewClient returns a factory for simulated KV clients.
 func NewClient(o ClientOptions) sim.ProcessFactory {
@@ -232,4 +248,10 @@ func (c *Client) remember(cmd kv.Command, r kv.Result) {
 	case kv.OpDelete:
 		delete(c.lastSeen, cmd.Key)
 	}
+}
+
+// kvCommandID is a command that only carries a request identity, for
+// requests (like the admin's) that are not KV operations.
+func kvCommandID(client, request uint64) kv.Command {
+	return kv.Command{ClientID: client, RequestID: request}
 }

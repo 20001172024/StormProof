@@ -12,11 +12,11 @@ func (n *Node) campaign() {
 	n.pendingReads = nil
 	n.resetElectionTimer()
 
-	if len(n.votes) >= n.quorum() {
+	if n.countVoters(n.votes) >= n.quorum() {
 		n.becomeLeader() // a one-node cluster elects itself
 		return
 	}
-	for _, p := range n.peers {
+	for _, p := range n.others() {
 		n.send(Message{
 			Type:         MsgVote,
 			To:           p,
@@ -74,7 +74,7 @@ func (n *Node) handleVoteResponse(m Message) {
 	}
 	// A map, not a counter, so a duplicated response is only counted once.
 	n.votes[m.From] = true
-	if len(n.votes) >= n.quorum() {
+	if n.countVoters(n.votes) >= n.quorum() {
 		n.becomeLeader()
 	}
 }

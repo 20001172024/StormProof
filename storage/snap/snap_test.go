@@ -16,7 +16,7 @@ func newDisk(seed uint64) *sim.Disk {
 
 func TestSaveLoad(t *testing.T) {
 	d := newDisk(1)
-	want := raft.Snapshot{Index: 42, Term: 7, Data: []byte("state")}
+	want := raft.Snapshot{Index: 42, Term: 7, Voters: []raft.NodeID{1, 3, 4}, Data: []byte("state")}
 	if err := Save(d, want, true); err != nil {
 		t.Fatal(err)
 	}
@@ -24,7 +24,7 @@ func TestSaveLoad(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Index != 42 || got.Term != 7 || string(got.Data) != "state" {
+	if got.Index != 42 || got.Term != 7 || string(got.Data) != "state" || !slices.Equal(got.Voters, want.Voters) {
 		t.Fatalf("got %+v", got)
 	}
 	if _, err := Load(d, 41); !errors.Is(err, fs.ErrNotExist) {

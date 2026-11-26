@@ -5,7 +5,7 @@ import "slices"
 // broadcastAppend sends AppendEntries to every follower: whatever entries
 // each is missing, or an empty heartbeat if it has them all.
 func (n *Node) broadcastAppend() {
-	for _, p := range n.peers {
+	for _, p := range n.others() {
 		n.sendAppend(p)
 	}
 }
@@ -103,6 +103,7 @@ func (n *Node) handleAppendEntries(m Message) {
 			n.unstable = min(n.unstable, e.Index)
 		}
 		n.log.append(m.Entries[i:]...)
+		n.refreshConfig() // the new entries may change the configuration, or undo a change
 		break
 	}
 
@@ -142,6 +143,9 @@ func (n *Node) handleAppendResponse(m Message) {
 		if m.MatchIndex > n.matchIndex[from] {
 			n.matchIndex[from] = m.MatchIndex
 			n.maybeCommit()
+			if n.role != Leader {
+				return // the commit removed us from the configuration (§4.2.2)
+			}
 		}
 		n.nextIndex[from] = max(n.nextIndex[from], n.matchIndex[from]+1)
 		if n.nextIndex[from] <= n.log.lastIndex() {
@@ -179,12 +183,19 @@ func (n *Node) maybeCommit() {
 	if n.role != Leader {
 		return
 	}
-	// The highest index stored on a majority: sort every node's match index
-	// (the leader's is its whole log) from high to low and take the one at
-	// position quorum-1.
-	matches := []uint64{n.log.lastIndex()}
-	for _, p := range n.peers {
-		matches = append(matches, n.matchIndex[p])
+	// The highest index stored on a majority of voters: sort every voter's
+	// match index (the leader's is its whole log, if it is a voter) from high
+	// to low and take the one at position quorum-1.
+	var matches []uint64
+	for _, v := range n.voters {
+		if v == n.id {
+			matches = append(matches, n.log.lastIndex())
+		} else {
+			matches = append(matches, n.matchIndex[v])
+		}
+	}
+	if len(matches) == 0 {
+		return
 	}
 	slices.Sort(matches)
 	slices.Reverse(matches)
@@ -203,6 +214,7 @@ func (n *Node) maybeCommit() {
 		return
 	}
 	n.commitIndex = N
+	n.stepDownIfRemoved()
 }
 
 // handleSnapshot implements the InstallSnapshot receiver (Figure 13).
@@ -235,6 +247,8 @@ func (n *Node) handleSnapshot(m Message) {
 	} else {
 		n.log.restore(s.Index, s.Term)
 	}
+	n.baseVoters = slices.Clone(s.Voters)
+	n.refreshConfig()
 	n.snapshot = s
 	n.newSnapshot = s
 	n.commitIndex = s.Index

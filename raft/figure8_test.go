@@ -117,6 +117,14 @@ func (c *cluster) restartWith(id NodeID, hs HardState, entries []Entry, knobs Te
 func (c *cluster) campaign(id NodeID) {
 	c.t.Helper()
 	n := c.nodes[id]
+	// Only the candidate is ticked here. In a real run the other servers'
+	// timers would have run on too; without that they would all still count
+	// a leader as recently heard from and ignore the votes (§4.2.3).
+	for _, other := range c.nodes {
+		if other != n && other.role != Leader {
+			other.electionElapsed = other.cfg.ElectionTicks
+		}
+	}
 	for tries := 0; tries < 5 && n.role != Leader; tries++ {
 		start := n.term
 		for ticks := 0; n.term == start; ticks++ { // until it starts a new election

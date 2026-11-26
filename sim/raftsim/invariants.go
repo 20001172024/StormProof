@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"slices"
 
 	"github.com/20001172024/stormproof/check"
 	"github.com/20001172024/stormproof/raft"
@@ -19,6 +20,7 @@ func Invariants() []sim.Invariant {
 		&oneVotePerTerm{votes: map[voteKey]raft.NodeID{}},
 		&logMatching{seen: map[sim.NodeID]version{}},
 		&leaderCompleteness{seen: map[sim.NodeID]version{}},
+		&singleServerChanges{seen: map[sim.NodeID]version{}},
 		&stateMachineSafety{snaps: map[uint64][]byte{}, states: map[uint64]stateSeen{}, seen: map[sim.NodeID]*Process{},
 			checked: map[sim.NodeID]int{}, checkedSnaps: map[sim.NodeID]int{}, checkedState: map[sim.NodeID]int{}},
 	}
@@ -44,8 +46,8 @@ func servers(nodes []sim.NodeView) []sim.NodeView {
 func Linearizable(nodes []sim.NodeView) error {
 	var ops []check.Op
 	for _, nv := range nodes {
-		if nv.Client {
-			ops = append(ops, nv.Process.(*Client).History()...)
+		if c, ok := nv.Process.(*Client); ok {
+			ops = append(ops, c.History()...)
 		}
 	}
 	if !check.Linearizable(ops) {
@@ -416,12 +418,12 @@ func (s *stateMachineSafety) Check(nodes []sim.NodeView) error {
 }
 
 // Settled is the end-of-run liveness check, for after a quiet period with
-// the workload stopped: there is one stable leader (StableLeader), every
-// node's log ends at the same entry as the leader's, everything in it is
-// committed, and every node has applied all of it.
+// the workload stopped: there is one stable leader (StableLeader), and every
+// server in the configuration has a log ending at the same entry as the
+// leader's, everything in it committed, and all of it applied.
 func Settled(nodes []sim.NodeView) error {
-	nodes = servers(nodes)
-	if err := StableLeader(nodes); err != nil {
+	nodes, err := members(nodes)
+	if err != nil {
 		return err
 	}
 	var leader raft.Status
@@ -447,31 +449,99 @@ func Settled(nodes []sim.NodeView) error {
 }
 
 // StableLeader is a liveness check for the end of a run, after a quiet
-// period: every node is up, they all agree on the same term, and exactly
-// one of them is the leader of it and known as leader by all.
+// period: among the servers in the current configuration, all are up, they
+// agree on the same term, and exactly one of them leads it and is known as
+// leader by all. Servers outside the configuration (never added, or
+// removed) are left out: a removed server is never told it was removed.
 func StableLeader(nodes []sim.NodeView) error {
+	_, err := members(nodes)
+	return err
+}
+
+// members returns the servers in the current configuration, after checking
+// StableLeader. The current configuration is the one the newest leader has.
+func members(nodes []sim.NodeView) ([]sim.NodeView, error) {
 	nodes = servers(nodes)
-	var leader raft.NodeID
-	var term raft.Term
+	var leader raft.Status
 	for _, nv := range nodes {
+		if nv.Up {
+			if st := status(nv); st.Role == raft.Leader && st.Term > leader.Term {
+				leader = st
+			}
+		}
+	}
+	if leader.ID == raft.None {
+		return nil, errors.New("no leader")
+	}
+	var out []sim.NodeView
+	for _, nv := range nodes {
+		if !slices.Contains(leader.Voters, raft.NodeID(nv.ID)) {
+			continue
+		}
 		if !nv.Up {
-			return fmt.Errorf("node %d is still down", nv.ID)
+			return nil, fmt.Errorf("node %d is still down", nv.ID)
 		}
 		st := status(nv)
-		if st.Role == raft.Leader {
-			if leader != raft.None {
-				return fmt.Errorf("nodes %d and %d both think they lead", leader, st.ID)
-			}
-			leader, term = st.ID, st.Term
+		if st.Role == raft.Leader && st.ID != leader.ID {
+			return nil, fmt.Errorf("nodes %d and %d both think they lead", leader.ID, st.ID)
 		}
+		if st.Term != leader.Term || st.Leader != leader.ID {
+			return nil, fmt.Errorf("node %d is in term %d following %d; leader %d is in term %d",
+				st.ID, st.Term, st.Leader, leader.ID, leader.Term)
+		}
+		out = append(out, nv)
 	}
-	if leader == raft.None {
-		return errors.New("no leader")
-	}
+	return out, nil
+}
+
+// singleServerChanges: consecutive configurations in any server's log
+// differ by exactly one voter. That is the property that makes any majority
+// of one overlap any majority of the next (dissertation §4.1).
+type singleServerChanges struct {
+	seen map[sim.NodeID]version
+}
+
+func (*singleServerChanges) Name() string { return "single-server-changes" }
+
+func (c *singleServerChanges) Check(nodes []sim.NodeView) error {
 	for _, nv := range nodes {
-		if st := status(nv); st.Term != term || st.Leader != leader {
-			return fmt.Errorf("node %d is in term %d following %d; leader %d is in term %d", st.ID, st.Term, st.Leader, leader, term)
+		if !nv.Up {
+			continue
+		}
+		v := versionOf(nv)
+		if c.seen[nv.ID] == v {
+			continue
+		}
+		c.seen[nv.ID] = v
+		var prev []raft.NodeID
+		for _, e := range proc(nv).Entries() {
+			if e.Type != raft.EntryConfChange {
+				continue
+			}
+			cur, err := raft.DecodeVoters(e.Data)
+			if err != nil {
+				return fmt.Errorf("node %d: entry %d: %w", nv.ID, e.Index, err)
+			}
+			if prev != nil && symmetricDifference(prev, cur) != 1 {
+				return fmt.Errorf("node %d: configuration at entry %d %v follows %v: not a single-server change", nv.ID, e.Index, cur, prev)
+			}
+			prev = cur
 		}
 	}
 	return nil
+}
+
+func symmetricDifference(a, b []raft.NodeID) int {
+	d := 0
+	for _, x := range a {
+		if !slices.Contains(b, x) {
+			d++
+		}
+	}
+	for _, x := range b {
+		if !slices.Contains(a, x) {
+			d++
+		}
+	}
+	return d
 }

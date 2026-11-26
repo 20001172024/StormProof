@@ -6,7 +6,8 @@
 // file or none at all, never a half-written one under the real name.
 //
 // Layout, little-endian: CRC-32C u32 of everything after it, then index
-// u64, term u64, and the snapshot data.
+// u64, term u64, voter count u32 and each voter u64 (the configuration at
+// index), and the snapshot data.
 package snap
 
 import (
@@ -50,6 +51,7 @@ func parseName(name string) (uint64, bool) {
 func Save(fsys storage.FS, s raft.Snapshot, sync bool) error {
 	body := binary.LittleEndian.AppendUint64(nil, s.Index)
 	body = binary.LittleEndian.AppendUint64(body, uint64(s.Term))
+	body = append(body, raft.EncodeVoters(s.Voters)...)
 	body = append(body, s.Data...)
 	b := binary.LittleEndian.AppendUint32(nil, crc32.Checksum(body, castagnoli))
 	b = append(b, body...)
@@ -88,15 +90,25 @@ func Load(fsys storage.FS, index uint64) (raft.Snapshot, error) {
 	if err != nil {
 		return raft.Snapshot{}, err
 	}
-	if len(b) < 20 || crc32.Checksum(b[4:], castagnoli) != binary.LittleEndian.Uint32(b) {
+	if len(b) < 24 || crc32.Checksum(b[4:], castagnoli) != binary.LittleEndian.Uint32(b) {
 		return raft.Snapshot{}, fmt.Errorf("%w: %s", ErrCorrupt, Name(index))
 	}
 	s := raft.Snapshot{
 		Index: binary.LittleEndian.Uint64(b[4:12]),
 		Term:  raft.Term(binary.LittleEndian.Uint64(b[12:20])),
 	}
-	if len(b) > 20 {
-		s.Data = append([]byte(nil), b[20:]...)
+	nv := uint64(binary.LittleEndian.Uint32(b[20:24]))
+	end := 24 + 8*nv
+	if uint64(len(b)) < end {
+		return raft.Snapshot{}, fmt.Errorf("%w: %s", ErrCorrupt, Name(index))
+	}
+	voters, err := raft.DecodeVoters(b[20:end])
+	if err != nil {
+		return raft.Snapshot{}, fmt.Errorf("%w: %s", ErrCorrupt, Name(index))
+	}
+	s.Voters = voters
+	if uint64(len(b)) > end {
+		s.Data = append([]byte(nil), b[end:]...)
 	}
 	if s.Index != index {
 		return raft.Snapshot{}, fmt.Errorf("%w: %s holds the snapshot at %d", ErrCorrupt, Name(index), s.Index)

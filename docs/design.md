@@ -604,7 +604,82 @@ entries in flight. Each one is caught by a unit test instead
 `TestAppendEntriesOverlappingSnapshot`), which is why both kinds of test
 exist.
 
-## 13. Real mode *(planned, M7)*
+## 13. Membership changes (M6b)
+
+**The rules (Raft dissertation §4, one server at a time).** A configuration
+is the set of voters. It changes through log entries holding the complete
+new voter list, and each server uses the newest configuration in its log
+as soon as the entry is appended, committed or not; if the entry is
+truncated away, the previous one comes back. Only one server is added or
+removed per change, and a leader starts no change while an earlier one is
+uncommitted: then any majority of the old configuration overlaps any
+majority of the new one, so two leaders can't win the same term.
+
+Three refinements matter in practice:
+
+- **The 2015 fix.** A leader must commit an entry in its own term before it
+  starts a change. Without it the single-server algorithm can still elect
+  two leaders (found by Ongaro in 2015, after the dissertation). The no-op
+  every leader appends on election makes this cheap.
+- **Removing the leader** (§4.2.2): it keeps leading, without counting
+  itself towards majorities, until the change commits, then steps down.
+- **Disruptive servers** (§4.2.3): a removed server is never told it was
+  removed (the leader stops sending to it), so it keeps timing out and
+  starting elections in ever higher terms. A server that has heard from a
+  current leader within the minimum election timeout therefore ignores
+  RequestVote entirely, without even adopting the candidate's term. A
+  leader counts itself as a current leader, so a higher-term RequestVote no
+  longer deposes it; a leader cut off from the majority is still replaced,
+  because the rest of the cluster stops hearing from it.
+
+Majorities, votes and ReadIndex acknowledgements count only voters; a
+server outside the configuration never starts an election. Snapshots carry
+the configuration at their index, and the WAL records each entry's type.
+
+**Simplifications.** New servers join as full voters immediately, without
+the catch-up rounds of §4.2.1: that is safe, but a slow new server can stall
+commits until it catches up. A removed server that is later added back may
+have raised its term while it was out; its first reply then makes the leader
+step down and costs an election. Pre-vote (dissertation §9.6) would fix both
+that and the term inflation measured in section 8; it is still not
+implemented.
+
+**In the simulator** (`-membership`), there are five server slots: the
+first three form the initial configuration, the other two start with none.
+An admin client adds and removes servers about once a second, keeping at
+least three voters, following leader hints and retrying like the KV
+clients, while the usual faults and client workload run. End-of-run checks
+consider only servers in the leader's current configuration. A new
+invariant checks that consecutive configurations in any log differ by
+exactly one server.
+
+**Results.** In 200 runs (40 per profile) the admin had about 1,950 changes
+acknowledged, roughly ten per run. 1,000 seeds across all profiles with
+membership changes: no violations (2 min 59 s). Fixed membership, also
+1,000 seeds each: no violations with 3 nodes (1 min 28 s) or 5 (3 min
+35 s). Those are slower than the M6a sweeps (52 s and 1 min 53 s); the
+cause has not been investigated yet.
+
+Bugs planted in the membership rules, 200 seeds each with membership
+changes:
+
+| Planted bug | Seeds failing |
+|---|---|
+| Change before committing in own term (the 2015 bug) | 0 |
+| Two changes in flight at once | 0 |
+| No vote stickiness (§4.2.3) | 10, all end-of-run liveness failures |
+
+The first two are out of reach of random testing for different reasons.
+The 2015 bug needs a precise five-step sequence, like Figure 8. Concurrent
+changes can't even happen with this admin, which waits for each change to
+commit before starting the next, so the leader's check is never exercised.
+Both are scripted as deterministic tests instead (`TestOngaro2015Bug`,
+`TestConcurrentConfChanges`): without the fixes, a committed configuration
+entry is overwritten, and two majorities commit different entries at the
+same index. All seven membership rules were also checked by planting each
+bug and confirming a unit test fails.
+
+## 14. Real mode *(planned, M7)*
 
 In real mode the `server` package plays the driver's role: a ticker goroutine
 calls `Tick` every tick interval, a gRPC handler calls `Step` for each

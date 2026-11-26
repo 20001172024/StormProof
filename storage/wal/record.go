@@ -93,13 +93,14 @@ func decodeHardState(p []byte) (raft.HardState, error) {
 	}, nil
 }
 
-// Entries payload: count u32, then per entry index u64, term u64,
+// Entries payload: count u32, then per entry index u64, term u64, type u8,
 // data length u32, data.
 func encodeEntries(es []raft.Entry) []byte {
 	b := binary.LittleEndian.AppendUint32(nil, uint32(len(es)))
 	for _, e := range es {
 		b = binary.LittleEndian.AppendUint64(b, e.Index)
 		b = binary.LittleEndian.AppendUint64(b, uint64(e.Term))
+		b = append(b, byte(e.Type))
 		b = binary.LittleEndian.AppendUint32(b, uint32(len(e.Data)))
 		b = append(b, e.Data...)
 	}
@@ -112,22 +113,26 @@ func decodeEntries(p []byte) ([]raft.Entry, error) {
 	}
 	n := binary.LittleEndian.Uint32(p)
 	p = p[4:]
-	// Each entry takes at least 20 bytes, which bounds a corrupt count
+	// Each entry takes at least 21 bytes, which bounds a corrupt count
 	// before anything is allocated for it.
-	if uint64(n)*20 > uint64(len(p)) {
+	if uint64(n)*21 > uint64(len(p)) {
 		return nil, ErrCorrupt
 	}
 	es := make([]raft.Entry, 0, n)
 	for i := uint32(0); i < n; i++ {
-		if len(p) < 20 {
+		if len(p) < 21 {
 			return nil, ErrCorrupt
 		}
 		e := raft.Entry{
 			Index: binary.LittleEndian.Uint64(p[0:8]),
 			Term:  raft.Term(binary.LittleEndian.Uint64(p[8:16])),
+			Type:  raft.EntryType(p[16]),
 		}
-		dlen := binary.LittleEndian.Uint32(p[16:20])
-		p = p[20:]
+		if e.Type > raft.EntryConfChange {
+			return nil, ErrCorrupt
+		}
+		dlen := binary.LittleEndian.Uint32(p[17:21])
+		p = p[21:]
 		if uint64(len(p)) < uint64(dlen) {
 			return nil, ErrCorrupt
 		}

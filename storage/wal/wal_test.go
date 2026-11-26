@@ -49,7 +49,7 @@ func script() ([]save, []State) {
 		{hs: hs(1, 1)},
 		{entries: []raft.Entry{ent(1, 1, ""), ent(2, 1, "a")}},
 		{hs: hs(2, 0), entries: []raft.Entry{ent(3, 2, "b")}},
-		{entries: []raft.Entry{ent(4, 2, "c"), ent(5, 2, "d")}},
+		{entries: []raft.Entry{ent(4, 2, "c"), {Index: 5, Term: 2, Type: raft.EntryConfChange, Data: raft.EncodeVoters([]raft.NodeID{1, 2})}}},
 		{hs: hs(3, 3), entries: []raft.Entry{ent(3, 3, "replaces b, c, d")}}, // truncation
 		{entries: []raft.Entry{ent(4, 3, "e")}},
 	}

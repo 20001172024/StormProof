@@ -171,9 +171,10 @@ type Ready struct {
 // state after applying every entry up to Index, the term of that entry,
 // and the state itself, which only the application understands.
 type Snapshot struct {
-	Index uint64 `json:"index"`
-	Term  Term   `json:"term"`
-	Data  []byte `json:"data,omitempty"`
+	Index  uint64   `json:"index"`
+	Term   Term     `json:"term"`
+	Voters []NodeID `json:"voters"` // the configuration in effect at Index
+	Data   []byte   `json:"data,omitempty"`
 }
 
 // ReadState is a confirmed ReadIndex request: the caller's ID for it, and
@@ -201,6 +202,9 @@ type Status struct {
 	// SnapIndex are no longer in the log. Both 0 without a snapshot.
 	SnapIndex uint64 `json:"snap_index,omitempty"`
 	SnapTerm  Term   `json:"snap_term,omitempty"`
+
+	// Voters is the current configuration, sorted.
+	Voters []NodeID `json:"voters"`
 }
 
 // Rand is the randomness a node needs: picking election timeouts. It is

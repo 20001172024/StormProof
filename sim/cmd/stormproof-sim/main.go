@@ -53,6 +53,7 @@ type options struct {
 	trace, traceDir    string
 	bug                string
 	clients            int
+	membership         bool
 }
 
 // run is main without the os.Exit, so tests can call it.
@@ -92,6 +93,7 @@ func parseFlags(args []string, stderr io.Writer) (options, error) {
 	buggy := fl.Bool("buggy", false, `short for -bug fsync`)
 	fl.StringVar(&o.bug, "bug", "", `plant a bug: "fsync", or for raft "dedup", "local-reads", "read-quorum", "snapshot-sessions"`)
 	fl.IntVar(&o.clients, "clients", raftsim.DefaultClients, "simulated KV clients (raft only)")
+	fl.BoolVar(&o.membership, "membership", false, "raft only: add two spare servers and an admin that adds and removes servers during the run (-nodes is the initial configuration)")
 	if err := fl.Parse(args); err != nil {
 		return o, err
 	}
@@ -133,9 +135,13 @@ func parseFlags(args []string, stderr io.Writer) (options, error) {
 // config builds the simulation for one seed. With several profiles, seeds
 // are spread across them in turn, so a seed always maps to the same profile.
 func (o options) config(seed uint64, trace io.Writer) sim.Config {
+	servers := o.nodes
+	if o.membership && o.node == "raft" {
+		servers = o.nodes + 2
+	}
 	cfg := sim.Config{
 		Seed:         seed,
-		Nodes:        o.nodes,
+		Nodes:        servers,
 		Duration:     o.duration,
 		Quiet:        o.quiet,
 		TickInterval: o.tick,
@@ -158,18 +164,28 @@ func (o options) config(seed uint64, trace io.Writer) sim.Config {
 			ro.SnapshotDropsSessions = true
 		}
 		co := raftsim.DefaultClientOptions
+		ad := raftsim.DefaultAdminOptions
 		if o.quiet > 0 {
 			// Stop new work partway through the quiet period so the cluster
 			// can finish replicating, then require it to have settled.
 			stop := o.duration - min(o.quiet, 3*sim.Second)
 			ro.ProposeUntil = stop
 			co.Until, co.RetryUntil = stop, stop+(o.duration-stop)/2
+			ad.Until, ad.RetryUntil = co.Until, co.RetryUntil
 			cfg.FinalCheck = raftsim.Settled
 		}
-		if o.clients > 0 {
+		var admin *raftsim.AdminOptions
+		if o.membership {
+			ro.InitialVoters = o.nodes
+			admin = &ad
+		}
+		if o.clients > 0 || admin != nil {
 			ro.ProposeProb = 0 // the clients are the workload
 			cfg.Clients = o.clients
-			cfg.NewClient = raftsim.NewClient(co)
+			if admin != nil {
+				cfg.Clients++
+			}
+			cfg.NewClient = raftsim.NewClients(co, admin, o.nodes)
 			cfg.FinalCheck = raftsim.Linearizable
 			if o.quiet > 0 {
 				cfg.FinalCheck = raftsim.SettledAndLinearizable

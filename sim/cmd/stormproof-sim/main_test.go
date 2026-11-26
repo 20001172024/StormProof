@@ -22,6 +22,7 @@ func TestSweep(t *testing.T) {
 		{"unknown node", []string{"-node", "paxos"}, exitError, ""},
 		{"dedup bug fails", []string{"-seeds", "10", "-profile", "flaky-net", "-bug", "dedup"}, exitViolation, "linearizab"},
 		{"unknown bug", []string{"-bug", "nope"}, exitError, ""},
+		{"membership changes", []string{"-seeds", "10", "-profile", "all", "-membership"}, exitOK, "0 failed"},
 		{"raft bug on toy", []string{"-node", "toy", "-bug", "dedup"}, exitError, ""},
 		{"quiet longer than run", []string{"-duration", "1s", "-quiet", "2s"}, exitError, ""},
 		{"unknown profile", []string{"-profile", "nope"}, exitError, ""},

@@ -218,9 +218,9 @@ func TestStaleVoteResponseIgnored(t *testing.T) {
 }
 
 // Figure 2, All Servers: any message with a higher term makes even a leader
-// step down.
+// step down. RequestVote is the exception (§4.2.3, see TestVoteStickiness).
 func TestHigherTermStepsDown(t *testing.T) {
-	for _, typ := range []MessageType{MsgVote, MsgVoteResp, MsgApp, MsgAppResp} {
+	for _, typ := range []MessageType{MsgVoteResp, MsgApp, MsgAppResp} {
 		n := newTestNode(t, 1, []NodeID{2, 3}, HardState{})
 		tickN(n, testElection)
 		n.Step(Message{Type: MsgVoteResp, From: 2, Term: 1, VoteGranted: true})
@@ -344,5 +344,46 @@ func TestConfigValidation(t *testing.T) {
 	}
 	if _, err := NewNode(base); err != nil {
 		t.Fatalf("valid config rejected: %v", err)
+	}
+}
+
+// §4.2.3: a server that has heard from a current leader within the minimum
+// election timeout ignores RequestVote, even from a higher term, so a
+// removed server can't depose a healthy leader. Once the timeout has passed
+// without hearing from a leader, votes are granted again.
+func TestVoteStickiness(t *testing.T) {
+	for _, knob := range []bool{false, true} {
+		f := newTestNode(t, 1, []NodeID{2, 3}, HardState{Term: 1})
+		f.cfg.Knobs.NoVoteStickiness = knob
+		f.Step(Message{Type: MsgApp, From: 2, Term: 1}) // hears from leader 2
+		drain(f)
+		f.Step(Message{Type: MsgVote, From: 3, Term: 5})
+		msgs := drain(f)
+		ignored := len(msgs) == 0 && f.term == 1
+		if ignored == knob {
+			t.Fatalf("NoVoteStickiness=%v: vote ignored = %v (messages %+v, term %d)", knob, ignored, msgs, f.term)
+		}
+	}
+
+	f := newTestNode(t, 1, []NodeID{2, 3}, HardState{Term: 1})
+	f.Step(Message{Type: MsgApp, From: 2, Term: 1})
+	drain(f)
+	tickN(f, testElection-1) // still within the timeout
+	f.Step(Message{Type: MsgVote, From: 3, Term: 5})
+	if len(drain(f)) != 0 {
+		t.Fatal("vote answered within the election timeout")
+	}
+	f.electionElapsed = testElection // the leader has been silent for a full timeout
+	f.Step(Message{Type: MsgVote, From: 3, Term: 5})
+	if msgs := drain(f); len(msgs) != 1 || !msgs[0].VoteGranted {
+		t.Fatalf("after the timeout: %+v, want the vote granted", msgs)
+	}
+
+	// A leader counts itself as a current leader.
+	c := newCluster(t, 3)
+	c.elect(1)
+	c.nodes[1].Step(Message{Type: MsgVote, From: 3, Term: 9})
+	if c.nodes[1].role != Leader {
+		t.Fatal("a leader was deposed by a RequestVote")
 	}
 }
