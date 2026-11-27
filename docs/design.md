@@ -335,6 +335,7 @@ terms. This is the problem pre-vote (Raft dissertation §9.6) addresses.
 These numbers show the inflation; they do not yet show how many needless
 leader changes it causes when a partition heals, which is what actually
 costs availability. Pre-vote is deferred until that is measured.
+(It was measured, and added, in M9: see section 17.)
 
 **Known gap: no check-quorum.** A leader cut off from the majority keeps
 believing it is leader until it hears a higher term. This is safe (it can't
@@ -853,3 +854,90 @@ longest partition plus an election (here, 1 s against up to 2 s), a
 partition started just before it can outlast it, and the final check
 reports "no leader". The defaults (5 s quiet, partitions of at most 2 s)
 leave enough time, and the examples use 2.5 s.
+
+## 17. CI at scale and pre-vote (M9)
+
+**Running seeds in parallel.** Seeds are independent, and each simulation
+runs on one goroutine with all its randomness drawn from its own seed. So
+`-parallel N` (default: one worker per CPU) runs N seeds at once without
+changing any of them, and prints results in seed order, so the output is
+identical for any N; a test checks exactly that. The first measurement
+scaled poorly: 4 workers did only 1.9× the seeds of 1. The cause was the
+garbage collector, not contention between seeds: a simulation's live heap
+is a few MB but it allocates quickly, so at Go's default `GOGC=100` the
+collector ran almost constantly and the workers waited on it. The CLI
+now sets `GOGC=400` unless the environment says otherwise: 4 workers then
+run 3.5× as fast as 1 (577 to 2,161 seeds/min on 4 CPUs, `-profile all`),
+for about 10 MB more peak memory (14 MB to 25 MB).
+
+**Per push and nightly.** CI runs 1,000 seeds of every profile on each
+push, once with a fixed cluster and once with servers added and removed.
+`nightly.yml` runs five jobs of 10,000 seeds each:
+
+| Job | Flags |
+|---|---|
+| all-profiles | `-profile all` |
+| five-servers | `-profile all -nodes 5` |
+| membership | `-profile all -membership` |
+| storm | `-profile storm` |
+| storm-membership | `-profile storm -membership` |
+
+Each night starts at seed (days since 1970) × 10,000 + 1, so every night
+explores seeds no earlier night ran, and a failing seed's number says which
+night found it. Failing seeds' traces are kept as artifacts for 30 days,
+and each job's summary lists failures with the command that replays them.
+Before the first nightly run, 2,000 seeds of each job, on the first
+night's range (207,840,001 onwards), ran here with no failures.
+
+**The `storm` profile** is harsher than `chaos`: 20% message loss and 10%
+duplication, crashes and partitions twice as often, outages up to 2 s and
+partitions up to 3 s, fsync failures five times as often and 20% clock
+skew. It runs only at night, so the per-push sweep keeps its size. Its
+delays stay at most 50 ms, like `chaos`: Raft only promises progress when
+messages are fast compared with the election timeout (§5.6), and above
+that the end-of-run "settled" check measures the network, not the code.
+
+**Pre-vote.** The first `storm` sweeps found a liveness problem in Raft
+(docs/bugs/005): a server that could never win an election, because its
+log was behind, kept timing out and raising its term, and each higher term
+deposed a working leader. Section 8 had predicted this kind of term
+inflation and deferred pre-vote until its cost was measured. This is that
+measurement: with 100 ms delays, 33 of 2,000 `storm` runs ended without a
+leader. Pre-vote (dissertation §9.6) fixed it.
+
+How it works: a follower whose election timer fires becomes a
+*pre-candidate* and sends PreVote requests carrying the term it would
+campaign in (its own plus one). Nothing changes on either side: no term is
+adopted, no vote recorded, no timer reset. A server answers yes only if
+the term would be newer than its own, the candidate's log is at least as
+up-to-date (§5.4.1), and it hasn't heard from a leader within the minimum
+election timeout (§4.2.3). With a majority of yeses, the pre-candidate
+starts a real election. A no carries the responder's real term, so a
+pre-candidate that is behind learns the current term and becomes a
+follower. The one subtlety is in `Step`: Figure 2's rule "if a message
+carries a higher term, adopt it" must skip PreVotes and granted
+PreVoteResponses, whose term is hypothetical.
+
+Pre-vote costs one extra round trip per election, which slows elections
+when messages are slow. With 100 ms delays and changing membership, 4 of
+2,000 `storm` runs still failed with pre-vote (160 without). Those were
+the timing limit, not a disruptive server: for example, a configuration
+of four voters with one still empty needed all three others to agree,
+through 20% loss, with round trips as long as the election timeout.
+
+Section 8 asked what term inflation costs in leader changes. Measured over
+200 seeds of 15 s runs (3 servers, KV clients), counting each server's
+final term and how many distinct leaders (server and term) were elected:
+
+| Profile | final term, p50 / max | leaders elected, p50 / max |
+|---|---|---|
+| partitions, without pre-vote | 23 / 60 | 5 / 8 |
+| partitions, with pre-vote | 3 / 7 | 3 / 7 |
+| chaos, without pre-vote | 31 / 59 | 7 / 11 |
+| chaos, with pre-vote | 7 / 14 | 5 / 10 |
+
+Pre-vote cuts the median term by a factor of 4 to 8. It also cuts the
+median number of leaders a run goes through, from 5 to 3 under partitions
+and from 7 to 5 under chaos: those are leader changes, each a gap in
+availability, caused only by servers that couldn't win. (Without pre-vote
+the figures are close to section 8's, which were measured on M2's code.)
