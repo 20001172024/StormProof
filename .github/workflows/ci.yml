@@ -128,3 +128,26 @@ jobs:
           docker tag stormproof:latest "$image:${{ github.sha }}"
           docker push "$image:latest"
           docker push "$image:${{ github.sha }}"
+
+  visualizer:
+    # The trace visualizer: unit tests (which also replay every example
+    # trace) and a production build.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: visualizer
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: visualizer/package-lock.json
+      - run: npm ci
+      - name: typecheck
+        run: npm run typecheck
+      - name: tests
+        run: npm test
+      - name: build
+        run: npm run build
