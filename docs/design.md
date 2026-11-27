@@ -650,7 +650,8 @@ commits until it catches up. A removed server that is later added back may
 have raised its term while it was out; its first reply then makes the leader
 step down and costs an election. Pre-vote (dissertation §9.6) would fix both
 that and the term inflation measured in section 8; it is still not
-implemented.
+implemented. (It was implemented in M9, after the simulator showed the
+cost: see section 17.)
 
 **In the simulator** (`-membership`), there are five server slots: the
 first three form the initial configuration, the other two start with none.
