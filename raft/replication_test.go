@@ -17,6 +17,8 @@ type cluster struct {
 	snaps   map[NodeID][]Snapshot
 	// drop, if set, decides which messages are lost.
 	drop func(Message) bool
+	// preVote is passed to nodes built by restart.
+	preVote bool
 }
 
 func newCluster(t *testing.T, size int) *cluster {
@@ -41,7 +43,7 @@ func (c *cluster) restart(id NodeID, hs HardState, entries []Entry) {
 	}
 	n, err := NewNode(Config{
 		ID: id, Peers: peers, ElectionTicks: testElection, HeartbeatTicks: testHeartbeat,
-		Rand: fixedRand(0), HardState: hs, Entries: entries,
+		Rand: fixedRand(0), HardState: hs, Entries: entries, PreVote: c.preVote,
 	})
 	if err != nil {
 		c.t.Fatal(err)
@@ -82,7 +84,7 @@ func (c *cluster) settle() {
 func (c *cluster) elect(id NodeID) {
 	c.t.Helper()
 	n := c.nodes[id]
-	for n.role != Candidate {
+	for n.role != Candidate && n.role != PreCandidate {
 		n.Tick()
 	}
 	c.settle()

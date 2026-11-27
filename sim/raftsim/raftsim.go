@@ -23,6 +23,8 @@ import (
 type Options struct {
 	ElectionTicks  int
 	HeartbeatTicks int
+	// PreVote turns on Raft's pre-vote round; on by default.
+	PreVote bool
 
 	// ProposeProb is the chance that a leader proposes a new command on a
 	// tick. ProposeUntil stops proposals at that virtual time, so the
@@ -69,7 +71,7 @@ type Options struct {
 // DefaultOptions: with a 10 ms tick, heartbeats every 10 ms, election
 // timeouts drawn from 100-200 ms, and a leader proposing on about one tick
 // in ten (about 10 commands per second).
-var DefaultOptions = Options{ElectionTicks: 10, HeartbeatTicks: 1, ProposeProb: 0.1, SnapshotEvery: 50}
+var DefaultOptions = Options{ElectionTicks: 10, HeartbeatTicks: 1, PreVote: true, ProposeProb: 0.1, SnapshotEvery: 50}
 
 // New returns a factory for simulated Raft nodes.
 func New(o Options) sim.ProcessFactory {
@@ -117,6 +119,7 @@ func open(env sim.Env, o Options) (*Process, error) {
 		Joining:        joining,
 		ElectionTicks:  o.ElectionTicks,
 		HeartbeatTicks: o.HeartbeatTicks,
+		PreVote:        o.PreVote,
 		FS:             env.Disk,
 		Rand:           env.Rand,
 		SegmentSize:    segment,

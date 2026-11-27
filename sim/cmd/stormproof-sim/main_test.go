@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -26,6 +27,8 @@ func TestSweep(t *testing.T) {
 		{"raft bug on toy", []string{"-node", "toy", "-bug", "dedup"}, exitError, ""},
 		{"quiet longer than run", []string{"-duration", "1s", "-quiet", "2s"}, exitError, ""},
 		{"unknown profile", []string{"-profile", "nope"}, exitError, ""},
+		{"storm profile", []string{"-seeds", "10", "-profile", "storm"}, exitOK, "0 failed"},
+		{"bad parallel", []string{"-parallel", "0"}, exitError, ""},
 		{"stray argument", []string{"extra"}, exitError, ""},
 	}
 	for _, c := range cases {
@@ -69,5 +72,64 @@ func TestReplayWritesTrace(t *testing.T) {
 	}
 	if fi, err := os.Stat(path); err != nil || fi.Size() == 0 {
 		t.Fatalf("trace not written: %v", err)
+	}
+}
+
+// Running seeds in parallel must not change anything but the speed: the
+// same seeds fail, reported in the same order, with the same violations.
+func TestParallelSweepMatchesSequential(t *testing.T) {
+	args := []string{"-seeds", "24", "-profile", "crashes", "-buggy", "-duration", "3s", "-quiet", "1s"}
+	outputs := map[int]string{}
+	for _, p := range []int{1, 4} {
+		var out, errOut bytes.Buffer
+		code := run(append(args, "-parallel", strconv.Itoa(p)), &out, &errOut)
+		if code != exitViolation {
+			t.Fatalf("-parallel %d: exit code %d\n%s%s", p, code, &out, &errOut)
+		}
+		// Drop the summary line: it has the wall-clock time.
+		lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+		outputs[p] = strings.Join(lines[:len(lines)-1], "\n")
+	}
+	if outputs[1] != outputs[4] {
+		t.Fatalf("-parallel 1 and 4 differ:\n--- 1:\n%s\n--- 4:\n%s", outputs[1], outputs[4])
+	}
+	if strings.Count(outputs[1], "VIOLATION") != 0 || !strings.Contains(outputs[1], "term-monotonic") {
+		t.Fatalf("unexpected output:\n%s", outputs[1])
+	}
+}
+
+// Every failing seed comes with a command that replays exactly that run,
+// and running it reproduces the violation.
+func TestReplayCommand(t *testing.T) {
+	var out, errOut bytes.Buffer
+	code := run([]string{"-seeds", "10", "-profile", "all", "-nodes", "5", "-buggy", "-duration", "4s", "-quiet", "2s", "-parallel", "2"}, &out, &errOut)
+	if code != exitViolation {
+		t.Fatalf("exit code %d\n%s%s", code, &out, &errOut)
+	}
+	var first, replay string
+	for _, l := range strings.Split(out.String(), "\n") {
+		if first == "" && strings.HasPrefix(l, "seed ") {
+			first = l
+		}
+		if replay == "" && strings.HasPrefix(l, "  replay: ") {
+			replay = strings.TrimPrefix(l, "  replay: ")
+		}
+	}
+	for _, want := range []string{"-nodes 5", "-bug fsync", "-duration 4s", "-quiet 2s", "-trace seed-"} {
+		if !strings.Contains(replay, want) {
+			t.Fatalf("replay command %q lacks %q", replay, want)
+		}
+	}
+	// Run it (minus the program name and the trace file) and expect the
+	// same violation.
+	fields := strings.Fields(replay)
+	args := fields[3 : len(fields)-2]
+	var rout, rerr bytes.Buffer
+	if code := run(args, &rout, &rerr); code != exitViolation {
+		t.Fatalf("replaying %v: exit code %d\n%s%s", args, code, &rout, &rerr)
+	}
+	violation := first[strings.Index(first, "): ")+3:]
+	if !strings.Contains(rout.String(), violation) {
+		t.Fatalf("replay did not reproduce %q:\n%s", violation, &rout)
 	}
 }

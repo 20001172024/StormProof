@@ -51,6 +51,13 @@ type Config struct {
 
 	// Knobs deliberately break Raft rules, so tests can check that the
 	// simulator catches the resulting bugs. Never set them outside tests.
+	// PreVote makes a server whose election timer fires first check, with
+	// a pre-vote round that changes no terms, that a majority would vote
+	// for it, and only then start a real election (dissertation §9.6). It
+	// stops a server that can't win, such as one whose log is behind, from
+	// deposing a working leader by raising terms over and over.
+	PreVote bool
+
 	Knobs TestingKnobs
 }
 
@@ -241,7 +248,9 @@ func (n *Node) Tick() {
 	// not yet added, or removed) can't win and would only disrupt.
 	n.electionElapsed++
 	if n.electionElapsed >= n.electionTimeout {
-		if n.isVoter(n.id) {
+		if n.isVoter(n.id) && n.cfg.PreVote {
+			n.preCampaign()
+		} else if n.isVoter(n.id) {
 			n.campaign()
 		} else {
 			n.resetElectionTimer()
@@ -334,7 +343,13 @@ func (n *Node) Step(m Message) {
 	// T > currentTerm: set currentTerm = T, convert to follower (§5.1)."
 	// Doing this first, for every message type, means the handlers below
 	// only ever see messages from our own term or older ones.
-	if m.Term > n.term {
+	//
+	// Pre-votes are the exception: a PreVote's term, and a granted
+	// response's, is the term the candidate *would* use, not one anyone is
+	// in, so it must change nothing (§9.6). A rejection carries the
+	// responder's real term and goes through the rule as usual.
+	preVoteTerm := m.Type == MsgPreVote || (m.Type == MsgPreVoteResp && m.VoteGranted)
+	if m.Term > n.term && !preVoteTerm {
 		leader := None
 		if m.Type == MsgApp {
 			leader = m.From // only a leader sends AppendEntries
@@ -347,6 +362,10 @@ func (n *Node) Step(m Message) {
 		n.handleRequestVote(m)
 	case MsgVoteResp:
 		n.handleVoteResponse(m)
+	case MsgPreVote:
+		n.handlePreVote(m)
+	case MsgPreVoteResp:
+		n.handlePreVoteResponse(m)
 	case MsgApp:
 		n.handleAppendEntries(m)
 	case MsgAppResp:
@@ -493,7 +512,13 @@ func (n *Node) resetElectionTimer() {
 
 // send queues a message from this node, stamped with the current term.
 func (n *Node) send(m Message) {
-	m.From = n.id
 	m.Term = n.term
+	n.sendAs(m)
+}
+
+// sendAs queues a message with the term already set in m: only pre-votes,
+// whose term is the one the candidate would campaign in.
+func (n *Node) sendAs(m Message) {
+	m.From = n.id
 	n.msgs = append(n.msgs, m)
 }

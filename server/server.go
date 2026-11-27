@@ -127,7 +127,7 @@ func New(cfg Config) (*Server, error) {
 	}
 	h, err := host.Open(host.Config{
 		ID: cfg.ID, Peers: peers,
-		ElectionTicks: cfg.ElectionTicks, HeartbeatTicks: cfg.HeartbeatTicks,
+		ElectionTicks: cfg.ElectionTicks, HeartbeatTicks: cfg.HeartbeatTicks, PreVote: true,
 		FS: fs, Rand: newRand(), SnapshotEvery: cfg.SnapshotEvery,
 	})
 	if err != nil {

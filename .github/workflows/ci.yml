@@ -64,8 +64,22 @@ jobs:
           go-version-file: go.mod
       - name: build simulator
         run: go build -o bin/stormproof-sim ./sim/cmd/stormproof-sim
+      # Seeds run on every CPU (-parallel defaults to the CPU count); each
+      # seed's run, and the output, are the same as running them one by one.
       - name: 1,000 seeds, all fault profiles (${{ matrix.mode.name }})
-        run: bin/stormproof-sim -seeds 1000 -profile all ${{ matrix.mode.flags }} -trace-dir traces
+        shell: bash # -o pipefail, so tee doesn't hide the simulator's exit code
+        run: bin/stormproof-sim -seeds 1000 -profile all ${{ matrix.mode.flags }} -trace-dir traces | tee sweep.log
+      - name: summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "### sim-sweep (${{ matrix.mode.name }})"
+            echo '```'
+            tail -n 1 sweep.log 2>/dev/null || echo "(no output)"
+            grep -E '^seed |^  replay: ' sweep.log 2>/dev/null | head -n 60 || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: upload failing traces
         if: failure()
         uses: actions/upload-artifact@v4
@@ -73,6 +87,7 @@ jobs:
           name: failing-traces-${{ matrix.mode.name }}
           path: traces/
           if-no-files-found: ignore
+          retention-days: 30
 
   proto:
     # Generated code is committed so `go build` needs no protobuf toolchain.

@@ -24,6 +24,10 @@ export function summarizeMessage(kind: string | undefined, msg: Msg | undefined)
       return `term ${num(m.term)}, last log ${num(m.last_log_index)}/${num(m.last_log_term)}`;
     case "RequestVoteResponse":
       return `term ${num(m.term)}, ${m.vote_granted ? "granted" : "denied"}`;
+    case "PreVote":
+      return `would campaign in term ${num(m.term)}, last log ${num(m.last_log_index)}/${num(m.last_log_term)}`;
+    case "PreVoteResponse":
+      return m.vote_granted ? `would vote in term ${num(m.term)}` : `no (in term ${num(m.term)})`;
     case "AppendEntries": {
       const n = Array.isArray(m.entries) ? m.entries.length : 0;
       const what = n === 0 ? "heartbeat" : `${n} entr${n === 1 ? "y" : "ies"}`;

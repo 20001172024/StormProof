@@ -15,6 +15,8 @@ const R = 140;
 const NODE_R = 32;
 
 export const KIND_COLORS: Record<string, string> = {
+  PreVote: "#d946ef",
+  PreVoteResponse: "#d946ef",
   RequestVote: "#8b5cf6",
   RequestVoteResponse: "#8b5cf6",
   AppendEntries: "#2563eb",
@@ -204,7 +206,15 @@ export function Network({ trace, view, flights, drops, t, dropWindow, showClient
     const up = nv?.up ?? false;
     const member = !voters || voters.has(id);
     const role = raft?.role ?? "follower";
-    const fill = !up ? "var(--down)" : role === "leader" ? "var(--leader)" : role === "candidate" ? "var(--candidate)" : "var(--follower)";
+    const fill = !up
+      ? "var(--down)"
+      : role === "leader"
+        ? "var(--leader)"
+        : role === "candidate"
+          ? "var(--candidate)"
+          : role === "pre-candidate"
+            ? "var(--precandidate)"
+            : "var(--follower)";
     return (
       <g key={`n${id}`} opacity={member ? 1 : 0.45}>
         <circle
@@ -253,6 +263,7 @@ export function Network({ trace, view, flights, drops, t, dropWindow, showClient
         {crosses}
       </svg>
       <div className="legend">
+        <span><i style={{ background: KIND_COLORS.PreVote }} />PreVote</span>
         <span><i style={{ background: KIND_COLORS.RequestVote }} />RequestVote</span>
         <span><i style={{ background: KIND_COLORS.AppendEntries }} />AppendEntries</span>
         <span><i style={{ background: KIND_COLORS.InstallSnapshot }} />InstallSnapshot</span>

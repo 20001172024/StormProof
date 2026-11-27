@@ -18,6 +18,10 @@ const (
 	Follower Role = iota
 	Candidate
 	Leader
+	// PreCandidate is a follower whose election timer fired and that is
+	// asking, without changing its term, whether it could win an election
+	// (pre-vote, Raft dissertation §9.6). Only with Config.PreVote.
+	PreCandidate
 )
 
 func (r Role) String() string {
@@ -28,6 +32,8 @@ func (r Role) String() string {
 		return "candidate"
 	case Leader:
 		return "leader"
+	case PreCandidate:
+		return "pre-candidate"
 	}
 	return "unknown"
 }
@@ -40,11 +46,13 @@ func (r Role) MarshalText() ([]byte, error) { return []byte(r.String()), nil }
 type MessageType int
 
 const (
-	MsgVote     MessageType = iota + 1 // RequestVote RPC (§5.2)
-	MsgVoteResp                        // reply to RequestVote
-	MsgApp                             // AppendEntries RPC (§5.3); in M2 only empty heartbeats
-	MsgAppResp                         // reply to AppendEntries
-	MsgSnap                            // InstallSnapshot RPC (§7); answered with MsgAppResp
+	MsgVote        MessageType = iota + 1 // RequestVote RPC (§5.2)
+	MsgVoteResp                           // reply to RequestVote
+	MsgApp                                // AppendEntries RPC (§5.3); in M2 only empty heartbeats
+	MsgAppResp                            // reply to AppendEntries
+	MsgSnap                               // InstallSnapshot RPC (§7); answered with MsgAppResp
+	MsgPreVote                            // pre-vote request (dissertation §9.6), for term+1
+	MsgPreVoteResp                        // reply to a pre-vote
 )
 
 func (t MessageType) String() string {
@@ -59,6 +67,10 @@ func (t MessageType) String() string {
 		return "AppendEntriesResponse"
 	case MsgSnap:
 		return "InstallSnapshot"
+	case MsgPreVote:
+		return "PreVote"
+	case MsgPreVoteResp:
+		return "PreVoteResponse"
 	}
 	return "unknown"
 }
@@ -79,13 +91,17 @@ func (t MessageType) MarshalText() ([]byte, error) { return []byte(t.String()), 
 //	                       Entries, LeaderCommit
 //	AppendEntriesResponse  Term, Success, and either MatchIndex (on success)
 //	                       or ConflictTerm and ConflictIndex (on failure)
+//	PreVote                as RequestVote, but Term is the term the sender
+//	                       would campaign in (its own plus one)
+//	PreVoteResponse        VoteGranted; Term is the request's Term if
+//	                       granted, else the responder's own term
 type Message struct {
 	Type MessageType `json:"type"`
 	From NodeID      `json:"from"`
 	To   NodeID      `json:"to"`
 	Term Term        `json:"term"`
 
-	// RequestVote
+	// RequestVote and PreVote
 	LastLogIndex uint64 `json:"last_log_index,omitempty"`
 	LastLogTerm  Term   `json:"last_log_term,omitempty"`
 	VoteGranted  bool   `json:"vote_granted,omitempty"`

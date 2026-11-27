@@ -7,6 +7,7 @@
   --accent: #2563eb;
   --leader: #e0a100;
   --candidate: #e8742c;
+  --precandidate: #c084d8;
   --follower: #5b7aa8;
   --down: #9aa3af;
   --danger: #d92d20;
@@ -29,6 +30,7 @@
     --accent: #6ea0ff;
     --leader: #f5c242;
     --candidate: #f59152;
+    --precandidate: #c99ae0;
     --follower: #7f9cc9;
     --down: #5d6675;
     --danger: #ff6b5e;
@@ -110,6 +112,7 @@ svg.net text { fill: var(--text); font-family: system-ui, sans-serif; }
 .card.leader { border-left-color: var(--leader); }
 .card.candidate { border-left-color: var(--candidate); }
 .card.follower { border-left-color: var(--follower); }
+.card.pre-candidate { border-left-color: var(--precandidate); }
 .card.down { border-left-color: var(--down); opacity: 0.65; }
 .card.nonvoter { border-style: dashed; }
 .card .name { display: flex; align-items: baseline; gap: 6px; font-weight: 600; }
