@@ -26,6 +26,71 @@ func (n *Node) campaign() {
 	}
 }
 
+// preCampaign starts a pre-vote round (dissertation §9.6): ask every other
+// server whether it would vote for us in term+1, changing nothing yet: not
+// our term, not our vote. Only if a majority says yes do we campaign for
+// real. A server that can't win (its log is behind, or the others still
+// hear from a leader) then never raises its term, so it can't depose the
+// leader the way it could by starting real elections it is bound to lose.
+func (n *Node) preCampaign() {
+	n.role = PreCandidate
+	n.leader = None
+	n.votes = map[NodeID]bool{n.id: true}
+	n.pendingReads = nil
+	n.resetElectionTimer() // if this round fails, try again after another timeout
+
+	if n.countVoters(n.votes) >= n.quorum() {
+		n.campaign() // a one-node cluster needs nobody's agreement
+		return
+	}
+	for _, p := range n.others() {
+		n.sendAs(Message{
+			Type:         MsgPreVote,
+			To:           p,
+			Term:         n.term + 1,
+			LastLogIndex: n.lastLogIndex(),
+			LastLogTerm:  n.lastLogTerm(),
+		})
+	}
+}
+
+// handlePreVote answers whether we would vote for the sender in m.Term, if
+// it started a real election. It is the RequestVote check minus everything
+// that changes state: no term change, no vote recorded, no timer reset.
+// We would vote for it if:
+//
+//   - its term would be newer than ours (otherwise it is behind, and our
+//     rejection's term tells it so);
+//   - we haven't heard from a current leader within the minimum election
+//     timeout (§4.2.3): if we have, the leader is fine and an election
+//     would only disrupt it; and
+//   - its log is at least as up-to-date as ours (§5.4.1), the condition
+//     without which it can't win anyway.
+//
+// Whom we voted for in our current term doesn't matter: the real election
+// would be in a later term, where we haven't voted yet.
+func (n *Node) handlePreVote(m Message) {
+	heardFromLeader := n.leader != None && n.electionElapsed < n.cfg.ElectionTicks
+	if m.Term > n.term && !heardFromLeader && logUpToDate(m.LastLogTerm, m.LastLogIndex, n.lastLogTerm(), n.lastLogIndex()) {
+		n.sendAs(Message{Type: MsgPreVoteResp, To: m.From, Term: m.Term, VoteGranted: true})
+		return
+	}
+	n.send(Message{Type: MsgPreVoteResp, To: m.From, VoteGranted: false})
+}
+
+// handlePreVoteResponse counts pre-votes; with a majority, the real
+// election starts. A rejection from a later term has already made us a
+// follower in that term (in Step); other rejections just don't count.
+func (n *Node) handlePreVoteResponse(m Message) {
+	if n.role != PreCandidate || m.Term != n.term+1 || !m.VoteGranted {
+		return
+	}
+	n.votes[m.From] = true
+	if n.countVoters(n.votes) >= n.quorum() {
+		n.campaign()
+	}
+}
+
 // handleRequestVote decides whether to vote for a candidate. It implements
 // the RequestVote receiver rules in Figure 2.
 //

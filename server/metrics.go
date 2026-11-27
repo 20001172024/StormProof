@@ -48,7 +48,7 @@ func newMetrics(id raft.NodeID, dropped func() float64) *metrics {
 	m := &metrics{
 		reg:       reg,
 		term:      gauge("raft_term", "Current Raft term."),
-		role:      gauge("raft_role", "Current role: 0 follower, 1 candidate, 2 leader."),
+		role:      gauge("raft_role", "Current role: 0 follower, 1 candidate, 2 leader, 3 pre-candidate."),
 		isLeader:  gauge("raft_is_leader", "1 if this server is the leader, else 0."),
 		commit:    gauge("raft_commit_index", "Highest log index known to be committed."),
 		applied:   gauge("raft_applied_index", "Highest log index applied to the key-value store."),

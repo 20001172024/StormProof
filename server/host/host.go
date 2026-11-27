@@ -44,6 +44,8 @@ type Config struct {
 
 	ElectionTicks  int
 	HeartbeatTicks int
+	// PreVote turns on Raft's pre-vote round (see raft.Config.PreVote).
+	PreVote bool
 
 	FS   storage.FS
 	Rand raft.Rand
@@ -182,6 +184,7 @@ func Open(cfg Config) (*Host, error) {
 		Joining:        cfg.Joining,
 		ElectionTicks:  cfg.ElectionTicks,
 		HeartbeatTicks: cfg.HeartbeatTicks,
+		PreVote:        cfg.PreVote,
 		Rand:           cfg.Rand,
 		HardState:      st.HardState,
 		Snapshot:       snapshot,
