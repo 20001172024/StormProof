@@ -1,0 +1,13 @@
+# The k3s cluster on AWS (deploy/terraform), pulling the image CI pushes to
+# the GitHub Container Registry on every merge to main. The package must be
+# public (GitHub: Packages > stormproof > Package settings > Change
+# visibility), or add an imagePullSecret.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../base
+  - ../../../monitoring
+images:
+  - name: stormproof
+    newName: ghcr.io/20001172024/stormproof
+    newTag: latest

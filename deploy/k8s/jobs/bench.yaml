@@ -1,0 +1,27 @@
+# The load generator as a Job, inside the cluster so the servers' leader
+# hints (peer DNS names) resolve. Used by chaos.sh; edit args for other
+# workloads.
+#
+#   kubectl apply -f deploy/k8s/jobs/bench.yaml && kubectl logs -f job/stormproof-bench
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: stormproof-bench
+  labels:
+    app.kubernetes.io/part-of: stormproof
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: bench
+          image: stormproof
+          command: ["stormproof-bench"]
+          args:
+            - -endpoints=stormproof-0.stormproof-peers:7000,stormproof-1.stormproof-peers:7000,stormproof-2.stormproof-peers:7000
+            - -clients=8
+            - -reads=0.5
+            - -warmup=2s
+            - -duration=90s
+            - -attempt-timeout=300ms

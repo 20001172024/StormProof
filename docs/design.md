@@ -1018,3 +1018,35 @@ which can undo a change, still recomputes from the whole log);
 Effect on the 3-server cluster, write-heavy, 32 clients: 656 ops/s with a
 median Put of 47 ms before, 5,735 ops/s at 5.2 ms after. The full tables
 are in benchmarks.md.
+
+## 19. Deployment (M11, first part)
+
+The real cluster runs on Kubernetes; the details are in
+`deploy/k8s/README.md` and `docs/aws.md`. The choices that follow from
+Raft:
+
+- **A StatefulSet, not a Deployment.** A Raft server's identity and log
+  must survive restarts: if server 2 came back with an empty log under its
+  old ID, it could vote again in a term it already voted in. A StatefulSet
+  gives each pod a stable name (stormproof-0..2), a stable DNS name and its
+  own volume, reattached wherever the pod is rescheduled. The server takes
+  its Raft ID from the pod's ordinal (`-id-from-hostname`), so the pods
+  share one spec.
+- **All pods start at once** (`podManagementPolicy: Parallel`). The default
+  starts pod N+1 only once pod N is ready, but a server is only ready
+  (`/readyz`) once it knows a leader, which needs a majority up: one at a
+  time would never get past the first.
+- **Peers find each other before they are ready.** The headless Service
+  publishes not-ready pods (`publishNotReadyAddresses`), for the same
+  reason. Readiness still matters for clients: the client Service only
+  routes to servers that know a leader, so a partitioned server drops out.
+- **A PodDisruptionBudget of minAvailable 2** stops node drains and
+  upgrades from taking down a majority at once.
+- **Spread over machines.** A preferred anti-affinity rule puts the three
+  servers on different nodes, so losing one machine costs one server.
+
+On AWS the cluster is three t3.small instances running k3s, provisioned by
+Terraform: cheap (about $0.09 an hour), and k3s enforces NetworkPolicy, so
+the chaos demo can partition a server for real. The Kubernetes API isn't
+exposed; it is reached through an SSH tunnel, and SSH is open only to one
+address.

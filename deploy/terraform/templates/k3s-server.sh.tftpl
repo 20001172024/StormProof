@@ -1,0 +1,6 @@
+#!/bin/bash
+# The k3s server (control plane, also runs workloads). Traefik is disabled:
+# nothing is exposed through an ingress; everything is reached by SSH tunnel.
+set -euo pipefail
+curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION='${k3s_version}' K3S_TOKEN='${token}' \
+  sh -s - server --disable traefik --write-kubeconfig-mode 644

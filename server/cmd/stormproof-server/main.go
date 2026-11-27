@@ -2,7 +2,14 @@
 //
 //	stormproof-server -id 1 -cluster 1=localhost:7001,2=localhost:7002,3=localhost:7003 -data /var/lib/stormproof -metrics :9091
 //
-// Every server gets the same -cluster list; it listens on its own entry.
+// Every server gets the same -cluster list; it listens on its own entry,
+// or on -listen if given.
+//
+// In a Kubernetes StatefulSet every pod gets the same arguments:
+// -id-from-hostname takes the ID from the pod's ordinal (stormproof-0 is
+// server 1, stormproof-2 is server 3), and -listen :7000 listens on all
+// addresses rather than resolving the pod's own DNS name, which may not
+// exist yet when the pod starts.
 // The data directory holds the write-ahead log and snapshots; restarting
 // with the same directory recovers the server's state.
 package main
@@ -12,6 +19,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"os/signal"
 	"strconv"
@@ -34,6 +42,8 @@ func run(args []string) error {
 	fl := flag.NewFlagSet("stormproof-server", flag.ContinueOnError)
 	var (
 		id       = fl.Uint64("id", 0, "this server's ID (must appear in -cluster)")
+		fromHost = fl.Bool("id-from-hostname", false, "take the ID from the hostname's trailing ordinal, plus one (StatefulSet pod stormproof-0 is server 1)")
+		listen   = fl.String("listen", "", "listen on this address instead of this server's -cluster entry (e.g. :7000)")
 		cluster  = fl.String("cluster", "", "every server as id=host:port, comma-separated")
 		data     = fl.String("data", "", "data directory (WAL and snapshots)")
 		tick     = fl.Duration("tick", 50*time.Millisecond, "Raft tick")
@@ -50,6 +60,18 @@ func run(args []string) error {
 	if err != nil {
 		return err
 	}
+	if *fromHost {
+		if *id != 0 {
+			return errors.New("use -id or -id-from-hostname, not both")
+		}
+		host, err := os.Hostname()
+		if err != nil {
+			return err
+		}
+		if *id, err = idFromHostname(host); err != nil {
+			return err
+		}
+	}
 	if *data == "" {
 		return errors.New("-data is required")
 	}
@@ -59,10 +81,16 @@ func run(args []string) error {
 	}
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
 
+	var lis net.Listener
+	if *listen != "" {
+		if lis, err = net.Listen("tcp", *listen); err != nil {
+			return err
+		}
+	}
 	s, err := server.New(server.Config{
 		ID: raft.NodeID(*id), Cluster: members, DataDir: *data,
 		Tick: *tick, ElectionTicks: *election, HeartbeatTicks: *hb, SnapshotEvery: *snapshot,
-		MetricsAddr: *metrics, Logger: log,
+		MetricsAddr: *metrics, Logger: log, Listener: lis,
 	})
 	if err != nil {
 		return err
@@ -110,4 +138,18 @@ func parseCluster(spec string) (map[raft.NodeID]string, error) {
 		out[raft.NodeID(id)] = addr
 	}
 	return out, nil
+}
+
+// idFromHostname turns a StatefulSet pod's hostname, NAME-ORDINAL, into a
+// server ID: the ordinal plus one, since 0 is not a valid ID.
+func idFromHostname(host string) (uint64, error) {
+	i := strings.LastIndexByte(host, '-')
+	if i < 0 {
+		return 0, fmt.Errorf("hostname %q has no -ordinal suffix", host)
+	}
+	n, err := strconv.ParseUint(host[i+1:], 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("hostname %q: ordinal %q is not a number", host, host[i+1:])
+	}
+	return n + 1, nil
 }

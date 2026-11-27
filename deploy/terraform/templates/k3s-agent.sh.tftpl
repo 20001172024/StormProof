@@ -1,0 +1,7 @@
+#!/bin/bash
+# A k3s agent: joins the server over the private network, retrying until
+# the server is up (the instances boot at the same time).
+set -euo pipefail
+until curl -sk --max-time 5 https://${server_ip}:6443/ping >/dev/null; do sleep 5; done
+curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION='${k3s_version}' K3S_TOKEN='${token}' \
+  K3S_URL='https://${server_ip}:6443' sh -s - agent
