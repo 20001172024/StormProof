@@ -1,0 +1,24 @@
+# Prometheus and Grafana for the Kubernetes deployment (the docker-compose
+# clusters use prometheus-3.yml and prometheus-5.yml directly). The
+# dashboard, grafana/dashboards/stormproof.json, can also be imported by
+# hand into any Grafana with a Prometheus data source of uid "prometheus".
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: stormproof
+resources:
+  - k8s/monitoring.yaml
+configMapGenerator:
+  - name: prometheus-config
+    files:
+      - prometheus.yml=k8s/prometheus.yml
+  - name: grafana-datasources
+    files:
+      - datasource.yaml=k8s/grafana-datasource.yaml
+  - name: grafana-dashboard-providers
+    files:
+      - providers.yaml=k8s/grafana-dashboards.yaml
+  - name: grafana-dashboards
+    files:
+      - grafana/dashboards/stormproof.json

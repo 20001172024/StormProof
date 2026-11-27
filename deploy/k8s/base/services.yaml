@@ -1,0 +1,31 @@
+# Peer discovery: a headless Service gives each pod a DNS name,
+# stormproof-N.stormproof-peers. publishNotReadyAddresses publishes those
+# names before the pods are ready, because they only become ready (know a
+# leader) after finding each other.
+apiVersion: v1
+kind: Service
+metadata:
+  name: stormproof-peers
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    app: stormproof
+  ports:
+    - name: grpc
+      port: 7000
+    - name: metrics
+      port: 9090
+---
+# The client API. Any ready server will do: the client library follows the
+# servers' hints to the leader, using the peer names above.
+apiVersion: v1
+kind: Service
+metadata:
+  name: stormproof
+spec:
+  selector:
+    app: stormproof
+  ports:
+    - name: grpc
+      port: 7000

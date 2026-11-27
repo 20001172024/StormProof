@@ -1,0 +1,25 @@
+# Cuts every pod labelled chaos=isolated off from the rest of the cluster,
+# in both directions: a network partition, as the simulator's "isolate"
+# fault does. Prometheus may still scrape it, so Grafana keeps showing what
+# the isolated server thinks. chaos.sh labels the leader and applies this.
+# Needs a network plugin that enforces NetworkPolicy (k3s's does; kind's
+# default may not).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: stormproof-isolate
+  labels:
+    app.kubernetes.io/part-of: stormproof
+spec:
+  podSelector:
+    matchLabels:
+      chaos: isolated
+  policyTypes: ["Ingress", "Egress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: prometheus
+      ports:
+        - port: 9090
+  egress: [] # nothing out: no Raft messages, no replies

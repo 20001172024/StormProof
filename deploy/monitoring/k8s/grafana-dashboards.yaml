@@ -1,0 +1,7 @@
+apiVersion: 1
+providers:
+  - name: stormproof
+    folder: StormProof
+    type: file
+    options:
+      path: /var/lib/grafana/dashboards

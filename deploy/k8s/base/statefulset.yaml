@@ -1,0 +1,89 @@
+# Each pod is one server. A StatefulSet gives them stable names
+# (stormproof-0, -1, -2), stable DNS names through the headless Service,
+# and their own volume, which follows the name across restarts and moves:
+# exactly what a Raft server needs, since its ID and its log must survive.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: stormproof
+spec:
+  serviceName: stormproof-peers
+  replicas: 3
+  # Start all servers at once rather than one by one: a server can only
+  # become ready (know a leader) once a majority is up to elect one.
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      app: stormproof
+  template:
+    metadata:
+      labels:
+        app: stormproof
+    spec:
+      terminationGracePeriodSeconds: 10
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001 # the image's stormproof user
+        fsGroup: 10001   # so it can write to the volume
+      affinity:
+        # Spread servers over nodes where there are several: losing one
+        # machine should cost one server, not a majority.
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    app: stormproof
+      containers:
+        - name: server
+          image: stormproof # set by the overlay
+          args:
+            - -id-from-hostname # stormproof-0 is server 1, and so on
+            - -listen=:7000
+            - -cluster=1=stormproof-0.stormproof-peers:7000,2=stormproof-1.stormproof-peers:7000,3=stormproof-2.stormproof-peers:7000
+            - -data=/data
+            - -metrics=:9090
+          ports:
+            - name: grpc
+              containerPort: 7000
+            - name: metrics
+              containerPort: 9090
+          # Ready once the server knows a leader, so the client Service only
+          # sends requests to servers that can serve or redirect them. A
+          # server cut off by a partition drops out of the Service.
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: metrics
+            periodSeconds: 2
+            failureThreshold: 2
+          # Alive while its event loop runs; the server stops itself after a
+          # storage failure, and a restart is the way back.
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 100m
+              memory: 64Mi
+            limits:
+              memory: 256Mi
+          volumeMounts:
+            - name: data
+              mountPath: /data
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          app: stormproof # so the volumes can be found (and deleted) by label
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 1Gi

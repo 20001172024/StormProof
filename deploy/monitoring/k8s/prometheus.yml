@@ -1,0 +1,13 @@
+# Prometheus configuration for the Kubernetes deployment: the servers by
+# their stable StatefulSet DNS names, so no service discovery (and no
+# cluster permissions) is needed.
+global:
+  scrape_interval: 2s
+
+scrape_configs:
+  - job_name: stormproof
+    static_configs:
+      - targets:
+          - stormproof-0.stormproof-peers:9090
+          - stormproof-1.stormproof-peers:9090
+          - stormproof-2.stormproof-peers:9090

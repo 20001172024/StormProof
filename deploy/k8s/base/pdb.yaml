@@ -1,0 +1,11 @@
+# Voluntary disruptions (node drains, upgrades) may take down at most one
+# server at a time: two of three must stay up to keep a majority.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: stormproof
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: stormproof
