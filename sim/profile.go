@@ -74,9 +74,37 @@ var Profiles = []Profile{
 	},
 }
 
+// HeavyProfiles are harsher than any of Profiles, for the nightly runs.
+// They are kept out of Profiles (and so out of "-profile all") so the
+// per-commit sweep stays the same size and speed.
+var HeavyProfiles = []Profile{
+	{
+		// storm is harsher than chaos: twice the loss, duplication, crashes
+		// and partitions, longer outages and partitions, five times the
+		// fsync failures and twice the clock skew.
+		//
+		// Delays stay at most 50 ms, as in chaos, so a round trip is at most
+		// the minimum election timeout (100 ms with the default 10 ticks of
+		// 10 ms). Raft promises progress only while round trips are well
+		// under the election timeout (§5.6); at 100 ms delays some runs end
+		// without a leader however correct the code is (docs/bugs/005).
+		// Partitions last at most 3 s, under the default 5 s quiet period.
+		Name:      "storm",
+		Net:       NetworkConfig{MinDelay: 1 * Millisecond, MaxDelay: 50 * Millisecond, DropProb: 0.2, DuplicateProb: 0.1},
+		Disk:      DiskConfig{SyncFailProb: 0.01, SlowSyncProb: 0.1, SlowSyncMax: 50 * Millisecond},
+		ClockSkew: 0.2,
+		Faults: FaultConfig{
+			Interval:  100 * Millisecond,
+			CrashProb: 0.2, MachineCrashProb: 0.5,
+			MinDowntime: 50 * Millisecond, MaxDowntime: 2 * Second,
+			PartitionProb: 0.2, MinPartition: 100 * Millisecond, MaxPartition: 3 * Second,
+		},
+	},
+}
+
 // ProfileByName returns the built-in profile with the given name.
 func ProfileByName(name string) (Profile, error) {
-	for _, p := range Profiles {
+	for _, p := range append(Profiles[:len(Profiles):len(Profiles)], HeavyProfiles...) {
 		if p.Name == name {
 			return p, nil
 		}

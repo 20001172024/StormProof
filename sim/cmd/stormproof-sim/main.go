@@ -4,6 +4,11 @@
 //
 //	stormproof-sim -seeds 1000 -profile chaos -trace-dir traces/
 //
+// Seeds run -parallel at a time (by default, one per CPU). Each seed's run
+// is unaffected, and results are printed in seed order, so the output is
+// the same for any -parallel. Each failing seed is printed with the command
+// that replays it.
+//
 // Replay one seed and write its trace:
 //
 //	stormproof-sim -seed 17 -profile chaos -trace seed-17.jsonl
@@ -15,7 +20,8 @@
 //
 // -bug plants a known bug, to see the simulator find it: "fsync" (both node
 // kinds; -buggy is short for it), and for raft "dedup", "local-reads",
-// "read-quorum" and "snapshot-sessions".
+// "read-quorum", "snapshot-sessions" and "no-prevote" (pre-vote off: not a
+// safety bug, but under -profile storm it costs liveness).
 package main
 
 import (
@@ -25,6 +31,9 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/20001172024/stormproof/sim"
@@ -54,6 +63,7 @@ type options struct {
 	bug                string
 	clients            int
 	membership         bool
+	parallel           int
 }
 
 // run is main without the os.Exit, so tests can call it.
@@ -91,8 +101,9 @@ func parseFlags(args []string, stderr io.Writer) (options, error) {
 	fl.StringVar(&o.trace, "trace", "", "with -seed: write the trace to this file")
 	fl.StringVar(&o.traceDir, "trace-dir", "", "without -seed: write a trace for each failing seed into this directory")
 	buggy := fl.Bool("buggy", false, `short for -bug fsync`)
-	fl.StringVar(&o.bug, "bug", "", `plant a bug: "fsync", or for raft "dedup", "local-reads", "read-quorum", "snapshot-sessions"`)
+	fl.StringVar(&o.bug, "bug", "", `plant a bug: "fsync", or for raft "dedup", "local-reads", "read-quorum", "snapshot-sessions", "no-prevote"`)
 	fl.IntVar(&o.clients, "clients", raftsim.DefaultClients, "simulated KV clients (raft only)")
+	fl.IntVar(&o.parallel, "parallel", runtime.NumCPU(), "without -seed: seeds to run at once (results don't depend on it)")
 	fl.BoolVar(&o.membership, "membership", false, "raft only: add two spare servers and an admin that adds and removes servers during the run (-nodes is the initial configuration)")
 	if err := fl.Parse(args); err != nil {
 		return o, err
@@ -105,16 +116,19 @@ func parseFlags(args []string, stderr io.Writer) (options, error) {
 	}
 	switch {
 	case o.bug == "" || o.bug == "fsync":
-	case o.node == "raft" && (o.bug == "dedup" || o.bug == "local-reads" || o.bug == "read-quorum" || o.bug == "snapshot-sessions"):
+	case o.node == "raft" && (o.bug == "dedup" || o.bug == "local-reads" || o.bug == "read-quorum" || o.bug == "snapshot-sessions" || o.bug == "no-prevote"):
 	default:
 		return o, fmt.Errorf("unknown -bug %q for -node %s", o.bug, o.node)
 	}
 
+	if o.parallel < 1 {
+		return o, errors.New("-parallel must be at least 1")
+	}
 	if o.node != "raft" && o.node != "toy" {
 		return o, fmt.Errorf(`-node must be "raft" or "toy", not %q`, o.node)
 	}
 	if *profile == "all" {
-		o.profiles = sim.Profiles
+		o.profiles = sim.Profiles // the heavier profiles in sim.HeavyProfiles only run when named
 	} else {
 		p, err := sim.ProfileByName(*profile)
 		if err != nil {
@@ -162,6 +176,8 @@ func (o options) config(seed uint64, trace io.Writer) sim.Config {
 			ro.Knobs.ReadIndexWithoutQuorum = true
 		case "snapshot-sessions":
 			ro.SnapshotDropsSessions = true
+		case "no-prevote":
+			ro.PreVote = false
 		}
 		co := raftsim.DefaultClientOptions
 		ad := raftsim.DefaultAdminOptions
@@ -241,6 +257,18 @@ func replay(o options, stdout, stderr io.Writer) int {
 	return exitOK
 }
 
+// result is the outcome of one seed in a sweep.
+type result struct {
+	seed    uint64
+	profile string
+	res     sim.Result
+	err     error
+}
+
+// sweep runs a range of seeds on o.parallel workers. Each simulation is
+// still single-threaded and seeded only by its seed, so running several at
+// once changes nothing about any one of them; results are reported in seed
+// order, so the output doesn't depend on the number of workers either.
 func sweep(o options, stdout, stderr io.Writer) int {
 	if o.seeds == 0 {
 		fmt.Fprintln(stderr, "stormproof-sim: -seeds must be at least 1")
@@ -254,34 +282,118 @@ func sweep(o options, stdout, stderr io.Writer) int {
 	}
 
 	begin := time.Now() // wall-clock time, only to report speed
-	var failed int
-	for seed := o.start; seed < o.start+o.seeds; seed++ {
-		cfg := o.config(seed, nil) // no trace: fast
-		res, err := sim.Run(cfg)
-		if err != nil {
-			fmt.Fprintf(stderr, "stormproof-sim: seed %d: %v\n", seed, err)
-			return exitError
+	seeds := make(chan uint64)
+	results := make(chan result)
+	stop := make(chan struct{}) // closed to make the workers give up early
+	var wg sync.WaitGroup
+	for range o.parallel {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for seed := range seeds {
+				cfg := o.config(seed, nil) // no trace: fast
+				res, err := sim.Run(cfg)
+				select {
+				case results <- result{seed, cfg.Profile.Name, res, err}:
+				case <-stop:
+					return
+				}
+			}
+		}()
+	}
+	go func() {
+		defer close(seeds)
+		for seed := o.start; seed < o.start+o.seeds; seed++ {
+			select {
+			case seeds <- seed:
+			case <-stop:
+				return
+			}
 		}
-		if res.Violation == nil {
-			continue
-		}
-		failed++
-		fmt.Fprintf(stdout, "seed %d (%s): %v\n", seed, cfg.Profile.Name, res.Violation)
-		if o.traceDir != "" {
-			if code := saveTrace(o, seed, res.Violation, stdout, stderr); code != exitOK {
-				return code
+	}()
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+	defer close(stop)
+
+	// Results arrive in any order; hold them until every earlier seed has
+	// been reported.
+	pending := map[uint64]result{}
+	next := o.start
+	var failed, done uint64
+	for r := range results {
+		pending[r.seed] = r
+		for {
+			r, ok := pending[next]
+			if !ok {
+				break
+			}
+			delete(pending, next)
+			next++
+			done++
+			if r.err != nil {
+				fmt.Fprintf(stderr, "stormproof-sim: seed %d: %v\n", r.seed, r.err)
+				return exitError
+			}
+			if r.res.Violation != nil {
+				failed++
+				fmt.Fprintf(stdout, "seed %d (%s): %v\n", r.seed, r.profile, r.res.Violation)
+				fmt.Fprintf(stdout, "  replay: %s\n", o.replayCommand(r.seed, r.profile))
+				if o.traceDir != "" {
+					if code := saveTrace(o, r.seed, r.res.Violation, stdout, stderr); code != exitOK {
+						return code
+					}
+				}
+			}
+			if o.seeds >= 1000 && done%(o.seeds/10) == 0 && done < o.seeds {
+				fmt.Fprintf(stdout, "  ... %d/%d seeds, %d failed, %v\n", done, o.seeds, failed, time.Since(begin).Round(time.Second))
 			}
 		}
 	}
 
 	elapsed := time.Since(begin)
-	fmt.Fprintf(stdout, "%d seeds (%d to %d), %d failed, in %v (%.0f seeds/min)\n",
+	fmt.Fprintf(stdout, "%d seeds (%d to %d), %d failed, in %v (%.0f seeds/min, %d workers)\n",
 		o.seeds, o.start, o.start+o.seeds-1, failed, elapsed.Round(time.Millisecond),
-		float64(o.seeds)/elapsed.Minutes())
+		float64(o.seeds)/elapsed.Minutes(), o.parallel)
 	if failed > 0 {
 		return exitViolation
 	}
 	return exitOK
+}
+
+// replayCommand is the command that re-runs one seed of this sweep on its
+// own, with the flags that shape the run. The profile is the seed's own
+// profile: with -profile all, a seed maps to one of them, and replaying
+// with just that profile picks it again.
+func (o options) replayCommand(seed uint64, profile string) string {
+	args := []string{"go run ./sim/cmd/stormproof-sim", fmt.Sprintf("-seed %d", seed), "-profile " + profile}
+	if o.node != "raft" {
+		args = append(args, "-node "+o.node)
+	}
+	if o.nodes != 3 {
+		args = append(args, fmt.Sprintf("-nodes %d", o.nodes))
+	}
+	if o.membership {
+		args = append(args, "-membership")
+	}
+	if o.bug != "" {
+		args = append(args, "-bug "+o.bug)
+	}
+	if o.node == "raft" && o.clients != raftsim.DefaultClients {
+		args = append(args, fmt.Sprintf("-clients %d", o.clients))
+	}
+	dur := func(t sim.Time) time.Duration { return time.Duration(t) * time.Microsecond }
+	if d := dur(o.duration); d != 15*time.Second {
+		args = append(args, "-duration "+d.String())
+	}
+	if d := dur(o.quiet); d != 5*time.Second {
+		args = append(args, "-quiet "+d.String())
+	}
+	if d := dur(o.tick); d != 10*time.Millisecond {
+		args = append(args, "-tick "+d.String())
+	}
+	return strings.Join(args, " ") + fmt.Sprintf(" -trace seed-%d.jsonl", seed)
 }
 
 // saveTrace re-runs a failing seed with tracing on. Getting the same
