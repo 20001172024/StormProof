@@ -32,6 +32,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -42,6 +43,14 @@ import (
 )
 
 func main() {
+	// A simulation's live heap is only a few MB, but it allocates fast, so
+	// with Go's default GOGC=100 the garbage collector runs almost all the
+	// time and parallel workers mostly wait for it: 4 workers ran only 1.9
+	// times as fast as 1. At 400 they run 3.6 times as fast, for about
+	// 10 MB more memory. GOGC in the environment still wins.
+	if os.Getenv("GOGC") == "" {
+		debug.SetGCPercent(400)
+	}
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
 }
 
