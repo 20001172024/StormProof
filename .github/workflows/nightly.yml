@@ -1,0 +1,94 @@
+name: nightly
+
+# Large simulator sweeps: 10,000 seeds per job, five jobs, including the
+# heavier storm profile. Each night covers a new range of seeds (from the
+# date), so the nightly runs keep exploring instead of repeating the same
+# 10,000. Failing seeds' traces are uploaded as artifacts, ready to load in
+# the visualizer, and each job's summary lists the failures with the command
+# that replays them.
+
+on:
+  schedule:
+    - cron: "17 2 * * *" # 02:17 UTC
+  workflow_dispatch:
+    inputs:
+      start:
+        description: "First seed (empty: chosen from today's date)"
+        required: false
+        default: ""
+      seeds:
+        description: "Seeds per job"
+        required: false
+        default: "10000"
+
+permissions:
+  contents: read
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        mode:
+          - { name: all-profiles, flags: "-profile all" }
+          - { name: five-servers, flags: "-profile all -nodes 5" }
+          - { name: membership, flags: "-profile all -membership" }
+          - { name: storm, flags: "-profile storm" }
+          - { name: storm-membership, flags: "-profile storm -membership" }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: build simulator
+        run: go build -o bin/stormproof-sim ./sim/cmd/stormproof-sim
+
+      - name: pick the seed range
+        id: range
+        shell: bash
+        env:
+          START: ${{ inputs.start }}
+          SEEDS: ${{ inputs.seeds }}
+        run: |
+          start="$START"
+          seeds="${SEEDS:-10000}"
+          case "$start$seeds" in *[!0-9]*) echo "start and seeds must be numbers"; exit 1 ;; esac
+          if [ -z "$start" ]; then
+            # Days since 1970 times 10,000: a fresh, non-overlapping range
+            # each night, and anyone can work out which night ran a seed.
+            start=$(( $(date -u +%s) / 86400 * 10000 + 1 ))
+          fi
+          echo "start=$start" >> "$GITHUB_OUTPUT"
+          echo "seeds=$seeds" >> "$GITHUB_OUTPUT"
+
+      - name: ${{ matrix.mode.name }}
+        shell: bash # -o pipefail, so tee doesn't hide the simulator's exit code
+        run: |
+          bin/stormproof-sim -seeds ${{ steps.range.outputs.seeds }} -start ${{ steps.range.outputs.start }} \
+            ${{ matrix.mode.flags }} -trace-dir traces | tee sweep.log
+
+      - name: summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "### ${{ matrix.mode.name }}: \`${{ matrix.mode.flags }}\`"
+            echo
+            echo "Seeds ${{ steps.range.outputs.start }} onwards."
+            echo
+            echo '```'
+            tail -n 1 sweep.log 2>/dev/null || echo "(no output)"
+            grep -E '^seed |^  replay: ' sweep.log 2>/dev/null | head -n 60 || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: upload failing traces
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: failing-traces-${{ matrix.mode.name }}
+          path: traces/
+          if-no-files-found: ignore
+          retention-days: 30
