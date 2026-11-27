@@ -13,3 +13,17 @@ func TestParseCluster(t *testing.T) {
 		}
 	}
 }
+
+func TestIDFromHostname(t *testing.T) {
+	good := map[string]uint64{"stormproof-0": 1, "stormproof-2": 3, "a-b-c-10": 11}
+	for host, want := range good {
+		if got, err := idFromHostname(host); err != nil || got != want {
+			t.Errorf("%q: got %d, %v; want %d", host, got, err, want)
+		}
+	}
+	for _, host := range []string{"stormproof", "stormproof-", "stormproof-x", "node-1a"} {
+		if _, err := idFromHostname(host); err == nil {
+			t.Errorf("%q accepted", host)
+		}
+	}
+}
