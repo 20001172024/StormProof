@@ -1,6 +1,7 @@
 # StormProof
 
 [![ci](https://github.com/20001172024/StormProof/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/20001172024/StormProof/actions/workflows/ci.yml)
+[![nightly](https://github.com/20001172024/StormProof/actions/workflows/nightly.yml/badge.svg?branch=main)](https://github.com/20001172024/StormProof/actions/workflows/nightly.yml)
 
 A replicated key-value store built on a from-scratch implementation of the
 Raft consensus algorithm, tested by a **deterministic simulator** that injects
@@ -13,8 +14,10 @@ visualizer** for replaying failures step by step.
 > reads and Porcupine linearizability checking (M5), snapshots with log
 > compaction (M6a) and single-server membership changes (M6b), all tested
 > in the simulator; real mode (M7): the same server code running over
-> gRPC, with a CLI, Prometheus metrics and docker-compose clusters; and
-> the trace visualizer (M8). CI at scale (M9) is next.
+> gRPC, with a CLI, Prometheus metrics and docker-compose clusters; the
+> trace visualizer (M8); and CI at scale (M9): 2,000 simulated seeds on
+> every push and 50,000 every night, including a harsher `storm` profile.
+> Benchmarks (M10) are next.
 
 ## Why it's built this way
 
@@ -77,7 +80,8 @@ deploy/docker/smoke.sh   # start, kill the leader, check writes continue, tear d
 Run the simulator:
 
 ```bash
-go run ./sim/cmd/stormproof-sim -seeds 1000 -profile all                     # sweep seeds: Raft + KV clients
+go run ./sim/cmd/stormproof-sim -seeds 1000 -profile all                     # sweep seeds on every CPU: Raft + KV clients
+go run ./sim/cmd/stormproof-sim -seeds 1000 -profile storm                   # the nightly runs' harsher fault profile
 go run ./sim/cmd/stormproof-sim -seeds 300 -bug dedup -trace-dir traces/     # plant a bug, save failing traces
 go run ./sim/cmd/stormproof-sim -seed 7 -bug fsync -trace seed-7.jsonl       # replay one seed
 go run ./sim/cmd/stormproof-sim -seeds 1000 -membership                      # servers added and removed during the run
@@ -92,6 +96,13 @@ cd visualizer && npm ci && npm run dev   # then open the printed URL and drop a 
 
 The visualizer is also published with GitHub Pages, preloaded with example
 traces (a leader crash, partitions, membership changes, a planted bug).
+
+## Bugs found by the simulator
+
+Five so far, each written up with its seed, symptom, root cause and fix in
+[docs/bugs/](docs/bugs/). Four were in the testing infrastructure; the
+fifth was a Raft liveness problem under heavy faults: a server that could
+never win an election kept raising its term and deposing the leader. Pre-vote fixed it.
 
 ## License
 
