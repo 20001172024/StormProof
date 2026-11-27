@@ -17,7 +17,9 @@ visualizer** for replaying failures step by step.
 > gRPC, with a CLI, Prometheus metrics and docker-compose clusters; the
 > trace visualizer (M8); CI at scale (M9): 2,000+ simulated seeds on
 > every push and 50,000 every night, including a harsher `storm` profile;
-> and benchmarks (M10). Cloud deployment on AWS (M11) is next.
+> benchmarks (M10); and the deployment configuration for AWS (M11):
+> Kubernetes manifests, monitoring, a chaos demo and Terraform, not yet
+> run on AWS (see [docs/aws.md](docs/aws.md)).
 
 ## Why it's built this way
 
@@ -40,6 +42,7 @@ replayed exactly. See [docs/design.md](docs/design.md).
 | `sim/` | Simulator: event loop, fake clock/network/disk, faults, invariants, traces |
 | `check/` | Linearizability checking: a Porcupine model of the KV store |
 | `bench/` | Load generator, benchmark and recovery scripts |
+| `deploy/` | Docker and docker-compose, Kubernetes manifests, Prometheus and Grafana, Terraform for AWS |
 | `proto/` | Protocol Buffers definitions |
 | `visualizer/` | React app for stepping through simulator traces, with example traces |
 | `docs/` | Design notes, bug write-ups, benchmarks |
@@ -87,6 +90,15 @@ go run ./sim/cmd/stormproof-sim -seeds 300 -bug dedup -trace-dir traces/     # p
 go run ./sim/cmd/stormproof-sim -seed 7 -bug fsync -trace seed-7.jsonl       # replay one seed
 go run ./sim/cmd/stormproof-sim -seeds 1000 -membership                      # servers added and removed during the run
 go run ./sim/cmd/stormproof-sim -node toy -seeds 1000                        # the toy counter used to test the simulator
+```
+
+Deploy on Kubernetes ([deploy/k8s/README.md](deploy/k8s/README.md)) or
+on AWS with Terraform and k3s ([docs/aws.md](docs/aws.md): about $0.09
+an hour while running, with `terraform destroy` steps):
+
+```bash
+kubectl apply -k deploy/k8s/overlays/local     # any cluster with the image loaded
+deploy/k8s/chaos.sh                            # kill and partition the leader under load
 ```
 
 Benchmark a docker-compose cluster (results land in `deploy/docker/results/`):
