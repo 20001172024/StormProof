@@ -12,9 +12,9 @@ visualizer** for replaying failures step by step.
 > crash-safe write-ahead log (M4), the KV store with sessions, ReadIndex
 > reads and Porcupine linearizability checking (M5), snapshots with log
 > compaction (M6a) and single-server membership changes (M6b), all tested
-> in the simulator; and real mode (M7): the same server code running over
-> gRPC, with a CLI, Prometheus metrics and docker-compose clusters. The
-> trace visualizer (M8) is next.
+> in the simulator; real mode (M7): the same server code running over
+> gRPC, with a CLI, Prometheus metrics and docker-compose clusters; and
+> the trace visualizer (M8). CI at scale (M9) is next.
 
 ## Why it's built this way
 
@@ -37,6 +37,7 @@ replayed exactly. See [docs/design.md](docs/design.md).
 | `sim/` | Simulator: event loop, fake clock/network/disk, faults, invariants, traces |
 | `check/` | Linearizability checking: a Porcupine model of the KV store |
 | `proto/` | Protocol Buffers definitions |
+| `visualizer/` | React app for stepping through simulator traces, with example traces |
 | `docs/` | Design notes, bug write-ups, benchmarks |
 
 ## Development
@@ -82,6 +83,15 @@ go run ./sim/cmd/stormproof-sim -seed 7 -bug fsync -trace seed-7.jsonl       # r
 go run ./sim/cmd/stormproof-sim -seeds 1000 -membership                      # servers added and removed during the run
 go run ./sim/cmd/stormproof-sim -node toy -seeds 1000                        # the toy counter used to test the simulator
 ```
+
+Step through a trace in the visualizer (needs Node 22):
+
+```bash
+cd visualizer && npm ci && npm run dev   # then open the printed URL and drop a .jsonl trace on it
+```
+
+The visualizer is also published with GitHub Pages, preloaded with example
+traces (a leader crash, partitions, membership changes, a planted bug).
 
 ## License
 
