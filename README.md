@@ -15,9 +15,9 @@ visualizer** for replaying failures step by step.
 > compaction (M6a) and single-server membership changes (M6b), all tested
 > in the simulator; real mode (M7): the same server code running over
 > gRPC, with a CLI, Prometheus metrics and docker-compose clusters; the
-> trace visualizer (M8); and CI at scale (M9): 2,000 simulated seeds on
-> every push and 50,000 every night, including a harsher `storm` profile.
-> Benchmarks (M10) are next.
+> trace visualizer (M8); CI at scale (M9): 2,000+ simulated seeds on
+> every push and 50,000 every night, including a harsher `storm` profile;
+> and benchmarks (M10). Cloud deployment on AWS (M11) is next.
 
 ## Why it's built this way
 
@@ -39,6 +39,7 @@ replayed exactly. See [docs/design.md](docs/design.md).
 | `client/` | Go client library and the `stormproof-cli` command |
 | `sim/` | Simulator: event loop, fake clock/network/disk, faults, invariants, traces |
 | `check/` | Linearizability checking: a Porcupine model of the KV store |
+| `bench/` | Load generator, benchmark and recovery scripts |
 | `proto/` | Protocol Buffers definitions |
 | `visualizer/` | React app for stepping through simulator traces, with example traces |
 | `docs/` | Design notes, bug write-ups, benchmarks |
@@ -88,6 +89,15 @@ go run ./sim/cmd/stormproof-sim -seeds 1000 -membership                      # s
 go run ./sim/cmd/stormproof-sim -node toy -seeds 1000                        # the toy counter used to test the simulator
 ```
 
+Benchmark a docker-compose cluster (results land in `deploy/docker/results/`):
+
+```bash
+bench/run.sh                                     # 3 servers, 10/50/90% reads, 3 runs each
+NODES=5 bench/run.sh
+go run ./bench/cmd/benchtable deploy/docker/results/3-servers
+bench/recovery.sh                                # time to recover from a leader crash
+```
+
 Step through a trace in the visualizer (needs Node 22):
 
 ```bash
@@ -96,6 +106,29 @@ cd visualizer && npm ci && npm run dev   # then open the printed URL and drop a 
 
 The visualizer is also published with GitHub Pages, preloaded with example
 traces (a leader crash, partitions, membership changes, a planted bug).
+
+## Benchmarks
+
+On one 4-vCPU cloud VM running a whole docker-compose cluster (servers,
+load generator and Prometheus share the CPUs and one disk), median of 3
+runs, 32 closed-loop clients, linearizable reads:
+
+| Servers | Workload | ops/sec | Put p50 / p99 | Get p50 / p99 |
+|---|---|---|---|---|
+| 3 | 10% reads | 5,735 | 5.2 / 13.4 ms | 3.7 / 10.3 ms |
+| 3 | 50% reads | 6,750 | 5.0 / 13.0 ms | 3.6 / 10.5 ms |
+| 3 | 90% reads | 7,955 | 4.9 / 12.2 ms | 3.5 / 10.1 ms |
+| 5 | 10% reads | 4,739 | 6.4 / 16.5 ms | 4.5 / 13.1 ms |
+| 5 | 50% reads | 5,121 | 6.8 / 17.4 ms | 4.8 / 14.2 ms |
+| 5 | 90% reads | 6,542 | 5.9 / 16.1 ms | 4.2 / 13.3 ms |
+
+After the leader's container is killed, writes succeed again within a
+median of 0.69 s (3 servers) and 0.52 s (5 servers). Benchmarking also
+found that write throughput *fell* as clients were added, from Raft
+replication resending unacknowledged entries in ever-growing chains;
+flow control and batching took write-heavy throughput at 32 clients from
+656 to 5,735 ops/s. Details, more configurations and how to reproduce them:
+[docs/benchmarks.md](docs/benchmarks.md).
 
 ## Bugs found by the simulator
 

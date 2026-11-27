@@ -941,3 +941,80 @@ median number of leaders a run goes through, from 5 to 3 under partitions
 and from 7 to 5 under chaos: those are leader changes, each a gap in
 availability, caused only by servers that couldn't win. (Without pre-vote
 the figures are close to section 8's, which were measured on M2's code.)
+
+## 18. Performance (M10): what benchmarking found
+
+The load generator (`bench/`) and the measurements are described in
+[benchmarks.md](benchmarks.md). Four problems turned up; none affected
+correctness, and the simulator sweeps passed before and after each fix.
+
+**1. The server kept the simulator's history.** `server/host` kept every
+applied entry, every snapshot, and a hash of the whole key-value store
+after every applied entry, because the simulator's state machine safety
+invariant reads them. The real server did too: its memory grew forever,
+and hashing the store on every write took 20% of CPU in a profile. Now
+`host.Config.KeepHistory` turns it on, and only the simulator sets it.
+
+**2. Replication resent everything, all the time.** The first benchmarks
+showed write throughput falling as clients were added: one client got 582
+writes/s, eight got 330. A CPU profile pointed at messages, and the code
+said why. A leader sent AppendEntries from `nextIndex` after every
+proposal, and again after every acknowledgement that found more to send.
+Until a follower acknowledged, each of those resent every unacknowledged
+entry. With proposals arriving all the time, each acknowledgement set off
+another send, so chains of send, acknowledge, send piled up faster than
+they finished. An experiment that removed the resend on acknowledgement
+gave 3.3 times the throughput at 4 clients; but that resend is what lets a
+lagging follower catch up between heartbeats, so the fix had to keep its
+effect without the pile-up.
+
+Figure 2 says what an AppendEntries carries, not when to send one. When
+to send only affects speed: every message passes the consistency check on
+arrival, so no sending policy can break safety. The dissertation (§10.2.1)
+suggests batching entries and pipelining messages. StormProof does the
+simpler half: **one outstanding batch per follower**.
+
+- A leader tracks, per follower, whether a batch of entries is outstanding
+  (`inflight`) and the last index it carried (`sentUpTo`).
+- A proposal sends only to followers with no batch outstanding. For the
+  others the entry waits in the log.
+- The batch is settled when the follower acknowledges up to `sentUpTo`, or
+  rejects it. Then everything that piled up goes in one message, so under
+  load batches grow by themselves.
+- Heartbeats still send from `nextIndex` regardless, so a lost batch is
+  resent within one heartbeat interval.
+- ReadIndex used to call the same broadcast, resending every
+  unacknowledged entry for every read. It now sends an AppendEntries with
+  no entries: just the consistency check at `nextIndex - 1`, whose
+  acknowledgement (or rejection) is the confirmation it needs.
+
+Acknowledgements of those empty messages carry `MatchIndex = nextIndex - 1`,
+below `sentUpTo`, so they don't settle a batch by mistake;
+`TestReadCheckCarriesNoEntries` covers this. Full pipelining (several
+batches in flight, `nextIndex` advanced optimistically) would add one more
+state per follower and a rule for going back to probing after a loss; one
+batch was enough to remove the collapse.
+
+**3. One fsync per event.** The server's event loop gave the Host one
+event at a time, so each client request and each Raft message cost a WAL
+write and an fsync. It now takes every event already queued (up to 512)
+and hands them over together (`host.Process`): Raft steps through all of
+them, then one Ready persists everything once and sends the messages.
+Raft allows any number of steps between Readys; the rule is only that
+state is persisted before the messages depending on it are sent, and the
+single Ready does that for all of them. The simulator's `-batch` holds
+each delivered event until the node's next one, so these multi-step
+Readys meet every injected fault; per-push CI runs 1,000 such seeds.
+
+**4. A full-log scan on every append.** Followers recomputed the
+configuration after appending entries by scanning back from the end of the
+log for a configuration entry. With none in the log, that is the whole
+log, every time: a micro-benchmark round took 4.8 us at 1,000 entries and
+80 us at 50,000. Only the appended entries can change the configuration
+when nothing was truncated, so only they are checked now (a truncation,
+which can undo a change, still recomputes from the whole log);
+`TestConfigAppendedMatchesFullScan` checks the two agree.
+
+Effect on the 3-server cluster, write-heavy, 32 clients: 656 ops/s with a
+median Put of 47 ms before, 5,735 ops/s at 5.2 ms after. The full tables
+are in benchmarks.md.
