@@ -160,9 +160,12 @@ func (n *Node) handleAppendEntries(m Message) {
 		if ok {
 			n.log.truncateFrom(e.Index) // conflict: drop it and everything after
 			n.unstable = min(n.unstable, e.Index)
+			n.log.append(m.Entries[i:]...)
+			n.refreshConfig() // the truncation may have undone a configuration change
+		} else {
+			n.log.append(m.Entries[i:]...)
+			n.configAppended(m.Entries[i:]) // only the new entries can change it
 		}
-		n.log.append(m.Entries[i:]...)
-		n.refreshConfig() // the new entries may change the configuration, or undo a change
 		break
 	}
 

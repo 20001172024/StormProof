@@ -149,6 +149,23 @@ func configFrom(entries []Entry, base []NodeID) ([]NodeID, uint64) {
 	return base, 0
 }
 
+// configAppended updates the configuration after entries were appended to
+// the log, with nothing truncated: the newest configuration entry among
+// them, if any, becomes the configuration (§4.1: a server uses the latest
+// configuration in its log, committed or not). Equivalent to refreshConfig
+// in that case, without scanning the whole log, which refreshConfig does
+// when the log holds no configuration entry and which made every append
+// cost time proportional to the log's length. Only followers append this
+// way, so there is no leader bookkeeping to update.
+func (n *Node) configAppended(es []Entry) {
+	for i := len(es) - 1; i >= 0; i-- {
+		if es[i].Type == EntryConfChange {
+			n.voters, n.confIndex = configFrom(es[i:i+1], n.baseVoters)
+			return
+		}
+	}
+}
+
 // refreshConfig recomputes the current configuration from the log. It is
 // called whenever the log changes, since appending a configuration entry
 // changes the configuration immediately and truncating one undoes it.

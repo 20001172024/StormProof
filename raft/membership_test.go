@@ -2,6 +2,7 @@ package raft
 
 import (
 	"errors"
+	"math/rand/v2"
 	"slices"
 	"testing"
 )
@@ -380,6 +381,36 @@ func TestConcurrentConfChanges(t *testing.T) {
 		a, b := c.nodes[1].log.entries[idx-1], c.nodes[2].log.entries[idx-1]
 		if c.nodes[2].commitIndex < idx || a.Term == b.Term {
 			t.Fatalf("expected two different committed entries at %d: %v and %v (2 committed to %d)", idx, a, b, c.nodes[2].commitIndex)
+		}
+	}
+}
+
+// configAppended must agree with recomputing the configuration from the
+// whole log, for any sequence of appends with or without configuration
+// entries.
+func TestConfigAppendedMatchesFullScan(t *testing.T) {
+	rng := rand.New(rand.NewPCG(1, 2))
+	for trial := range 200 {
+		n := follower(t, 1)
+		var log []Entry
+		for range 20 {
+			var batch []Entry
+			for range 1 + rng.IntN(4) {
+				e := Entry{Index: uint64(len(log) + len(batch) + 1), Term: 1}
+				if rng.IntN(5) == 0 {
+					vs := []NodeID{1, 2, NodeID(3 + rng.IntN(3))}
+					e.Type, e.Data = EntryConfChange, EncodeVoters(vs)
+				}
+				batch = append(batch, e)
+			}
+			n.log.append(batch...)
+			n.configAppended(batch)
+			log = append(log, batch...)
+			wantVoters, wantIndex := configFrom(log, n.baseVoters)
+			if !slices.Equal(n.voters, wantVoters) || n.confIndex != wantIndex {
+				t.Fatalf("trial %d: after appending %d entries, voters %v at %d; full scan gives %v at %d",
+					trial, len(log), n.voters, n.confIndex, wantVoters, wantIndex)
+			}
 		}
 	}
 }
