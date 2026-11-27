@@ -155,8 +155,41 @@ func (p *Process) Snapshots() []raft.Snapshot { return p.host.Snapshots() }
 // States returns the store's state hash after every applied index.
 func (p *Process) States() []host.IndexedState { return p.host.States() }
 
+// TermRun is a run of consecutive log entries with the same term: entries
+// From .. From+Count-1. A log is traced as its runs, which keeps traces small
+// (a log of hundreds of entries is usually only a few terms) while still
+// letting the visualizer draw every entry.
+type TermRun struct {
+	From  uint64    `json:"from"`
+	Term  raft.Term `json:"term"`
+	Count int       `json:"count"`
+}
+
+// traceState is what the trace records for a server: its status, the
+// index applied to its store, and its log after the snapshot as term runs.
+type traceState struct {
+	raft.Status
+	Applied uint64    `json:"applied"`
+	Log     []TermRun `json:"log"`
+}
+
+// termRuns run-length encodes a log by term.
+func termRuns(entries []raft.Entry) []TermRun {
+	runs := []TermRun{}
+	for _, e := range entries {
+		if n := len(runs); n > 0 && runs[n-1].Term == e.Term {
+			runs[n-1].Count++
+			continue
+		}
+		runs = append(runs, TermRun{From: e.Index, Term: e.Term, Count: 1})
+	}
+	return runs
+}
+
 // TraceState implements sim.Stater.
-func (p *Process) TraceState() any { return p.host.Status() }
+func (p *Process) TraceState() any {
+	return traceState{Status: p.host.Status(), Applied: p.host.AppliedIndex(), Log: termRuns(p.host.Entries())}
+}
 
 // Tick implements sim.Process.
 func (p *Process) Tick() ([]sim.Message, error) {
