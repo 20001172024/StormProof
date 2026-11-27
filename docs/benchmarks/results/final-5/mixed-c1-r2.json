@@ -1,0 +1,37 @@
+{
+  "label": "final-5 mixed-c1-r2",
+  "when": "2026-11-27T12:11:53.550802159Z",
+  "config": {
+    "Clients": 1,
+    "Duration": 10000000000,
+    "Warmup": 3000000000,
+    "Reads": 0.5,
+    "Keys": 1000,
+    "ValueSize": 100,
+    "OpTimeout": 5000000000,
+    "Seed": 1
+  },
+  "measured_ns": 10000000000,
+  "ops": 6943,
+  "ops_per_sec": 694.3,
+  "by_op": {
+    "get": {
+      "count": 3492,
+      "errors": 0,
+      "p50_ms": 0.797,
+      "p95_ms": 1.393,
+      "p99_ms": 2.22,
+      "max_ms": 13.315,
+      "mean_ms": 0.865
+    },
+    "put": {
+      "count": 3451,
+      "errors": 0,
+      "p50_ms": 1.86,
+      "p95_ms": 3.031,
+      "p99_ms": 4.605,
+      "max_ms": 20.609,
+      "mean_ms": 2.003
+    }
+  }
+}

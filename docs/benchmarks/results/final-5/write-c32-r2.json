@@ -1,0 +1,37 @@
+{
+  "label": "final-5 write-c32-r2",
+  "when": "2026-11-27T12:11:13.080373994Z",
+  "config": {
+    "Clients": 32,
+    "Duration": 10000000000,
+    "Warmup": 3000000000,
+    "Reads": 0.1,
+    "Keys": 1000,
+    "ValueSize": 100,
+    "OpTimeout": 5000000000,
+    "Seed": 1
+  },
+  "measured_ns": 10000000000,
+  "ops": 47393,
+  "ops_per_sec": 4739.3,
+  "by_op": {
+    "get": {
+      "count": 4729,
+      "errors": 0,
+      "p50_ms": 4.468,
+      "p95_ms": 8.848,
+      "p99_ms": 13.072,
+      "max_ms": 23.727,
+      "mean_ms": 4.916
+    },
+    "put": {
+      "count": 42664,
+      "errors": 0,
+      "p50_ms": 6.41,
+      "p95_ms": 11.616,
+      "p99_ms": 15.866,
+      "max_ms": 31.042,
+      "mean_ms": 6.936
+    }
+  }
+}

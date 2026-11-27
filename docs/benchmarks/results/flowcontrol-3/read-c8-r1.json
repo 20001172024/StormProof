@@ -1,0 +1,37 @@
+{
+  "label": "flowcontrol-3 read-c8-r1",
+  "when": "2026-11-27T11:49:05.249380877Z",
+  "config": {
+    "Clients": 8,
+    "Duration": 10000000000,
+    "Warmup": 3000000000,
+    "Reads": 0.9,
+    "Keys": 1000,
+    "ValueSize": 100,
+    "OpTimeout": 5000000000,
+    "Seed": 1
+  },
+  "measured_ns": 10000000000,
+  "ops": 38755,
+  "ops_per_sec": 3875.5,
+  "by_op": {
+    "get": {
+      "count": 34784,
+      "errors": 0,
+      "p50_ms": 1.715,
+      "p95_ms": 3.641,
+      "p99_ms": 5.397,
+      "max_ms": 18.579,
+      "mean_ms": 1.922
+    },
+    "put": {
+      "count": 3971,
+      "errors": 0,
+      "p50_ms": 2.994,
+      "p95_ms": 5.386,
+      "p99_ms": 7.251,
+      "max_ms": 15.239,
+      "mean_ms": 3.24
+    }
+  }
+}

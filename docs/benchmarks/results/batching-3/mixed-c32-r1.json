@@ -1,0 +1,37 @@
+{
+  "label": "batching-3 mixed-c32-r1",
+  "when": "2026-11-27T11:21:11.584129003Z",
+  "config": {
+    "Clients": 32,
+    "Duration": 10000000000,
+    "Warmup": 3000000000,
+    "Reads": 0.5,
+    "Keys": 1000,
+    "ValueSize": 100,
+    "OpTimeout": 5000000000,
+    "Seed": 1
+  },
+  "measured_ns": 10000000000,
+  "ops": 69022,
+  "ops_per_sec": 6902.2,
+  "by_op": {
+    "get": {
+      "count": 34418,
+      "errors": 0,
+      "p50_ms": 3.607,
+      "p95_ms": 6.514,
+      "p99_ms": 9.581,
+      "max_ms": 36.875,
+      "mean_ms": 3.831
+    },
+    "put": {
+      "count": 34604,
+      "errors": 0,
+      "p50_ms": 5.053,
+      "p95_ms": 8.718,
+      "p99_ms": 12.37,
+      "max_ms": 36.539,
+      "mean_ms": 5.415
+    }
+  }
+}

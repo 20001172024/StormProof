@@ -1,0 +1,37 @@
+{
+  "label": "batching-3 write-c8-r1",
+  "when": "2026-11-27T11:18:29.369900365Z",
+  "config": {
+    "Clients": 8,
+    "Duration": 10000000000,
+    "Warmup": 3000000000,
+    "Reads": 0.1,
+    "Keys": 1000,
+    "ValueSize": 100,
+    "OpTimeout": 5000000000,
+    "Seed": 1
+  },
+  "measured_ns": 10000000000,
+  "ops": 25722,
+  "ops_per_sec": 2572.2,
+  "by_op": {
+    "get": {
+      "count": 2641,
+      "errors": 0,
+      "p50_ms": 2.28,
+      "p95_ms": 3.856,
+      "p99_ms": 5.684,
+      "max_ms": 12.788,
+      "mean_ms": 2.346
+    },
+    "put": {
+      "count": 23081,
+      "errors": 0,
+      "p50_ms": 2.918,
+      "p95_ms": 4.995,
+      "p99_ms": 7.089,
+      "max_ms": 27.158,
+      "mean_ms": 3.188
+    }
+  }
+}

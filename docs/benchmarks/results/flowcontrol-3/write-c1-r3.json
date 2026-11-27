@@ -1,0 +1,37 @@
+{
+  "label": "flowcontrol-3 write-c1-r3",
+  "when": "2026-11-27T11:44:48.387480281Z",
+  "config": {
+    "Clients": 1,
+    "Duration": 10000000000,
+    "Warmup": 3000000000,
+    "Reads": 0.1,
+    "Keys": 1000,
+    "ValueSize": 100,
+    "OpTimeout": 5000000000,
+    "Seed": 1
+  },
+  "measured_ns": 10000000000,
+  "ops": 5815,
+  "ops_per_sec": 581.5,
+  "by_op": {
+    "get": {
+      "count": 573,
+      "errors": 0,
+      "p50_ms": 0.659,
+      "p95_ms": 1.032,
+      "p99_ms": 2.011,
+      "max_ms": 8.115,
+      "mean_ms": 0.721
+    },
+    "put": {
+      "count": 5242,
+      "errors": 0,
+      "p50_ms": 1.69,
+      "p95_ms": 2.607,
+      "p99_ms": 4.24,
+      "max_ms": 31.719,
+      "mean_ms": 1.819
+    }
+  }
+}

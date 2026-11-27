@@ -1,0 +1,37 @@
+{
+  "label": "baseline-3 write-c1-r3",
+  "when": "2026-11-27T11:38:19.241423502Z",
+  "config": {
+    "Clients": 1,
+    "Duration": 10000000000,
+    "Warmup": 3000000000,
+    "Reads": 0.1,
+    "Keys": 1000,
+    "ValueSize": 100,
+    "OpTimeout": 5000000000,
+    "Seed": 1
+  },
+  "measured_ns": 10000000000,
+  "ops": 5801,
+  "ops_per_sec": 580.1,
+  "by_op": {
+    "get": {
+      "count": 575,
+      "errors": 0,
+      "p50_ms": 0.655,
+      "p95_ms": 1.037,
+      "p99_ms": 1.655,
+      "max_ms": 3.476,
+      "mean_ms": 0.7
+    },
+    "put": {
+      "count": 5226,
+      "errors": 0,
+      "p50_ms": 1.681,
+      "p95_ms": 2.684,
+      "p99_ms": 4.153,
+      "max_ms": 57.08,
+      "mean_ms": 1.827
+    }
+  }
+}

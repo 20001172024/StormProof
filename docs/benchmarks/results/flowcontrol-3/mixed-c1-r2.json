@@ -1,0 +1,37 @@
+{
+  "label": "flowcontrol-3 mixed-c1-r2",
+  "when": "2026-11-27T11:46:36.60285171Z",
+  "config": {
+    "Clients": 1,
+    "Duration": 10000000000,
+    "Warmup": 3000000000,
+    "Reads": 0.5,
+    "Keys": 1000,
+    "ValueSize": 100,
+    "OpTimeout": 5000000000,
+    "Seed": 1
+  },
+  "measured_ns": 10000000000,
+  "ops": 7975,
+  "ops_per_sec": 797.5,
+  "by_op": {
+    "get": {
+      "count": 3986,
+      "errors": 0,
+      "p50_ms": 0.634,
+      "p95_ms": 0.986,
+      "p99_ms": 1.479,
+      "max_ms": 6.556,
+      "mean_ms": 0.672
+    },
+    "put": {
+      "count": 3989,
+      "errors": 0,
+      "p50_ms": 1.708,
+      "p95_ms": 2.588,
+      "p99_ms": 4.255,
+      "max_ms": 15.056,
+      "mean_ms": 1.818
+    }
+  }
+}

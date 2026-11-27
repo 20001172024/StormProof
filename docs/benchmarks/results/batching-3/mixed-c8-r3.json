@@ -1,0 +1,37 @@
+{
+  "label": "batching-3 mixed-c8-r3",
+  "when": "2026-11-27T11:20:58.070866453Z",
+  "config": {
+    "Clients": 8,
+    "Duration": 10000000000,
+    "Warmup": 3000000000,
+    "Reads": 0.5,
+    "Keys": 1000,
+    "ValueSize": 100,
+    "OpTimeout": 5000000000,
+    "Seed": 1
+  },
+  "measured_ns": 10000000000,
+  "ops": 30038,
+  "ops_per_sec": 3003.8,
+  "by_op": {
+    "get": {
+      "count": 15168,
+      "errors": 0,
+      "p50_ms": 2.001,
+      "p95_ms": 3.7,
+      "p99_ms": 5.88,
+      "max_ms": 24.96,
+      "mean_ms": 2.154
+    },
+    "put": {
+      "count": 14870,
+      "errors": 0,
+      "p50_ms": 2.898,
+      "p95_ms": 5.021,
+      "p99_ms": 7.84,
+      "max_ms": 25.132,
+      "mean_ms": 3.166
+    }
+  }
+}

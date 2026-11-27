@@ -1,0 +1,37 @@
+{
+  "label": "final-5 read-c32-r1",
+  "when": "2026-11-27T12:15:02.528308292Z",
+  "config": {
+    "Clients": 32,
+    "Duration": 10000000000,
+    "Warmup": 3000000000,
+    "Reads": 0.9,
+    "Keys": 1000,
+    "ValueSize": 100,
+    "OpTimeout": 5000000000,
+    "Seed": 1
+  },
+  "measured_ns": 10000000000,
+  "ops": 66214,
+  "ops_per_sec": 6621.4,
+  "by_op": {
+    "get": {
+      "count": 59483,
+      "errors": 0,
+      "p50_ms": 4.223,
+      "p95_ms": 8.563,
+      "p99_ms": 12.842,
+      "max_ms": 29.616,
+      "mean_ms": 4.651
+    },
+    "put": {
+      "count": 6731,
+      "errors": 0,
+      "p50_ms": 5.767,
+      "p95_ms": 10.905,
+      "p99_ms": 15.791,
+      "max_ms": 27.734,
+      "mean_ms": 6.276
+    }
+  }
+}

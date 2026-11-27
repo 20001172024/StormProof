@@ -1,0 +1,37 @@
+{
+  "label": "baseline-3 write-c8-r3",
+  "when": "2026-11-27T11:38:59.823159246Z",
+  "config": {
+    "Clients": 8,
+    "Duration": 10000000000,
+    "Warmup": 3000000000,
+    "Reads": 0.1,
+    "Keys": 1000,
+    "ValueSize": 100,
+    "OpTimeout": 5000000000,
+    "Seed": 1
+  },
+  "measured_ns": 10000000000,
+  "ops": 3185,
+  "ops_per_sec": 318.5,
+  "by_op": {
+    "get": {
+      "count": 307,
+      "errors": 0,
+      "p50_ms": 24.035,
+      "p95_ms": 31.294,
+      "p99_ms": 36.882,
+      "max_ms": 39.465,
+      "mean_ms": 24.364
+    },
+    "put": {
+      "count": 2878,
+      "errors": 0,
+      "p50_ms": 24.789,
+      "p95_ms": 33.018,
+      "p99_ms": 37.906,
+      "max_ms": 46.733,
+      "mean_ms": 25.124
+    }
+  }
+}
