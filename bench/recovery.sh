@@ -49,7 +49,7 @@ cleanup
 dc up -d --wait $(seq -f 'node%g' 1 "$NODES") >/dev/null
 
 out="results/$LABEL/summary.csv"
-echo "rep,killed,new_leader,election_ms,writes_ms" >"$out"
+echo "rep,killed,new_leader,kill_ms,election_ms,writes_ms" >"$out"
 for r in $(seq 1 "$REPS"); do
 	L=$(leader)
 	tl="$LABEL/timeline-$r.csv"
@@ -59,8 +59,15 @@ for r in $(seq 1 "$REPS"); do
 	bench=$!
 	sleep 5
 
+	# Time from just after the kill returns: the leader is certainly dead by
+	# then. (Timing from before 'docker compose kill' counted the CLI's own
+	# start-up, during which the old leader was still serving writes.) The
+	# kill itself takes a few milliseconds, recorded as kill_ms.
+	id=$(dc ps -q "node$L")
+	before_ns=$(now_ns)
+	docker kill "$id" >/dev/null
 	kill_ns=$(now_ns)
-	dc kill "node$L" >/dev/null 2>&1
+	kill_ms=$(( (kill_ns - before_ns) / 1000000 ))
 	new=""
 	while [ -z "$new" ]; do
 		for i in $(seq 1 "$NODES"); do
@@ -76,8 +83,8 @@ for r in $(seq 1 "$REPS"); do
 		END { if (min == "") print "never"; else printf "%d", min }' "results/$tl")
 	election_ms=$(( (elected_ns - kill_ns) / 1000000 ))
 	if [ "$writes_ns" = never ]; then writes_ms=never; else writes_ms=$(( (writes_ns - kill_ns) / 1000000 )); fi
-	echo "== rep $r: killed node$L, node$new elected after ${election_ms} ms, writes back after ${writes_ms} ms"
-	echo "$r,$L,$new,$election_ms,$writes_ms" >>"$out"
+	echo "== rep $r: killed node$L (in ${kill_ms} ms), node$new elected after ${election_ms} ms, writes back after ${writes_ms} ms"
+	echo "$r,$L,$new,$kill_ms,$election_ms,$writes_ms" >>"$out"
 
 	dc start "node$L" >/dev/null
 	dc up -d --wait "node$L" >/dev/null
