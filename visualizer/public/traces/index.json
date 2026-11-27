@@ -2,26 +2,31 @@
   {
     "file": "leader-crash.jsonl",
     "title": "Leader crashes, twice",
-    "description": "Crashes profile, seed 5. S2 leads term 1 until its machine crashes at 1.0 s; S1 wins term 2, then crashes at 2.2 s; S3 wins term 3. Watch the election timeouts fire and the logs converge after restarts."
+    "description": "Crashes profile, seed 5. S2 leads term 1 until its machine crashes at 1.0 s; S1 wins term 2, then crashes at 2.2 s; S3 wins term 3. Watch the pre-vote and vote rounds after each timeout, and the logs converging after restarts."
   },
   {
     "file": "leader-isolated.jsonl",
     "title": "Leader cut off by a partition",
-    "description": "Partitions profile, seed 16. The leader, S2, is isolated at 1.4 s. S3 wins term 3 within 0.1 s, while S2 still thinks it leads term 2 but can commit nothing. When the partition heals at 2.78 s, S2 hears term 3 and steps down."
+    "description": "Partitions profile, seed 35. The leader, S1, is isolated at 0.5 s. S3 runs a pre-vote round, wins term 2 at 0.66 s, and the cluster carries on, while S1 still believes it leads term 1 but can commit nothing. When the partition heals at 2.34 s, S1 hears term 2, steps down and catches up."
   },
   {
     "file": "follower-isolated.jsonl",
-    "title": "Isolated follower disrupts the leader",
-    "description": "Partitions profile, seed 4. S3 is isolated from 2.2 s to 3.0 s and keeps timing out, running its term up to 7. When it rejoins, its high term forces the healthy leader S1 to step down, and S1 wins term 8. This is the disruption the pre-vote extension prevents."
+    "title": "Without pre-vote: an isolated follower disrupts the leader",
+    "description": "Partitions profile, seed 4, with pre-vote switched off (-bug no-prevote). S3 is isolated from 2.2 s to 3.0 s and keeps timing out, raising its term to 7. When it rejoins, its higher term forces the healthy leader S1 to step down, and S1 wins term 8. The simulator found this problem; see docs/bugs/005."
+  },
+  {
+    "file": "follower-isolated-prevote.jsonl",
+    "title": "With pre-vote: the same partition, no disruption",
+    "description": "The same seed with pre-vote on. While isolated, S3 only runs pre-vote rounds, which raise no terms. When it rejoins, it is still in term 1, the leader S1 is never deposed, and S3 simply catches up."
   },
   {
     "file": "membership.jsonl",
     "title": "Membership changes",
-    "description": "Calm profile with -membership, seed 2. Starting from S1-S3, the admin client adds S4, removes S2 (the leader, which steps down; S1 takes over), adds S5, removes S4 and adds S2 back, one server at a time."
+    "description": "Calm profile with -membership, seed 2. Starting from S1-S3, the admin client adds S4, removes S2 (the leader, which steps down; S1 takes over in term 2), adds S5, removes S4 and adds S2 back, one server at a time."
   },
   {
     "file": "bug-fsync.jsonl",
     "title": "Planted bug: no fsync (violation)",
-    "description": "Crashes profile, seed 13, with -bug fsync: servers never fsync their term and vote. S2's machine crashes at 1.6 s and loses its unsynced writes; when it restarts at 1.76 s its term has gone back from 2 to 0, and the term-monotonic invariant catches it."
+    "description": "Crashes profile, seed 13, with -bug fsync: servers never fsync their term and vote. S2, the leader of term 1, has its machine crash at 1.6 s and loses its unsynced writes; when it restarts at 1.76 s its term has gone back from 1 to 0, and the term-monotonic invariant catches it."
   }
 ]

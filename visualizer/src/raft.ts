@@ -1,7 +1,7 @@
 // The state a Raft server writes into the trace (sim/raftsim: raft.Status
 // plus the applied index and the log, run-length encoded by term).
 
-export type Role = "follower" | "candidate" | "leader";
+export type Role = "follower" | "pre-candidate" | "candidate" | "leader";
 
 export interface TermRun {
   from: number; // index of the run's first entry
