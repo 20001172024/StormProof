@@ -28,6 +28,7 @@ type metrics struct {
 	leaderChanges prometheus.Counter // times the leader this server knows of changed
 
 	clientRequests *prometheus.HistogramVec // by op and gRPC code
+	batchSize      prometheus.Histogram     // events processed together by the event loop
 	raftSends      *prometheus.HistogramVec // Send RPCs to each peer, by peer and result
 }
 
@@ -73,7 +74,13 @@ func newMetrics(id raft.NodeID, dropped func() float64) *metrics {
 			Buckets:     prometheus.ExponentialBuckets(0.0001, 2, 14), // 0.1 ms to about 0.8 s
 		}, []string{"peer", "result"}),
 	}
-	reg.MustRegister(m.clientRequests, m.raftSends)
+	m.batchSize = prometheus.NewHistogram(prometheus.HistogramOpts{
+		Namespace: "stormproof", Name: "event_batch_size",
+		Help:        "Events (ticks, Raft messages, client requests) the event loop processed together, with one fsync.",
+		ConstLabels: labels,
+		Buckets:     prometheus.ExponentialBuckets(1, 2, 10), // 1 to 512
+	})
+	reg.MustRegister(m.clientRequests, m.raftSends, m.batchSize)
 	reg.MustRegister(prometheus.NewCounterFunc(prometheus.CounterOpts{
 		Namespace: "stormproof", Name: "raft_messages_dropped_total",
 		Help:        "Raft messages dropped because a peer's send queue was full or the peer unknown.",
@@ -105,6 +112,8 @@ func (m *metrics) observe(prev, cur raft.Status, applied uint64) {
 		m.leaderChanges.Inc()
 	}
 }
+
+func (m *metrics) observeBatch(events int) { m.batchSize.Observe(float64(events)) }
 
 func (m *metrics) observeRequest(op, code string, d time.Duration) {
 	m.clientRequests.WithLabelValues(op, code).Observe(d.Seconds())

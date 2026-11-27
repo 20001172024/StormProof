@@ -227,6 +227,34 @@ func (h *Host) Handle(req Request) (Output, error) {
 	return h.handleReady()
 }
 
+// Batch is several events handed to the node together. Processing them
+// with one Ready means one write to the WAL, one fsync, and one send of the
+// resulting messages, instead of one of each per event: under load that is
+// the difference between an fsync per request and an fsync per batch.
+type Batch struct {
+	Ticks    int
+	Messages []raft.Message
+	Requests []Request
+}
+
+// Process handles a batch: its ticks, then its messages, then its requests,
+// then one Ready. The events arrived concurrently, so any order is one they
+// could have arrived in. Raft allows any number of steps between Readys;
+// what matters is that their state is persisted before their messages go
+// out, which handleReady does as for a single event.
+func (h *Host) Process(b Batch) (Output, error) {
+	for range b.Ticks {
+		h.node.Tick()
+	}
+	for _, m := range b.Messages {
+		h.node.Step(m)
+	}
+	for _, r := range b.Requests {
+		h.handleClient(r)
+	}
+	return h.handleReady()
+}
+
 // Propose proposes a KV command that no client is waiting for (the
 // simulator's internal workload). It returns raft.ErrNotLeader if this
 // server is not the leader.

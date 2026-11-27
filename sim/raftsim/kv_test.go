@@ -155,3 +155,17 @@ func TestSnapshotsHappen(t *testing.T) {
 		t.Fatalf("snapshots taken: %d; InstallSnapshot in trace: %v", taken, bytes.Contains(buf.Bytes(), []byte("InstallSnapshot")))
 	}
 }
+
+// With Batch, Readys cover several steps (as in the real server under
+// load). Every invariant and the linearizability check must still hold.
+func TestBatchedProcessing(t *testing.T) {
+	o := testOptions()
+	o.Batch = true
+	for _, profile := range []string{"chaos", "partitions", "crashes", "storm"} {
+		for seed := uint64(1); seed <= seedCount(100); seed++ {
+			if res := run(t, kvConfig(seed, profile, o)); res.Violation != nil {
+				t.Fatalf("%s seed %d with batching: %v", profile, seed, res.Violation)
+			}
+		}
+	}
+}

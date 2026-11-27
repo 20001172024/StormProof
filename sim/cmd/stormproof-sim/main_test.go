@@ -28,6 +28,7 @@ func TestSweep(t *testing.T) {
 		{"quiet longer than run", []string{"-duration", "1s", "-quiet", "2s"}, exitError, ""},
 		{"unknown profile", []string{"-profile", "nope"}, exitError, ""},
 		{"storm profile", []string{"-seeds", "10", "-profile", "storm"}, exitOK, "0 failed"},
+		{"batched events", []string{"-seeds", "10", "-profile", "all", "-batch", "-membership"}, exitOK, "0 failed"},
 		{"bad parallel", []string{"-parallel", "0"}, exitError, ""},
 		{"stray argument", []string{"extra"}, exitError, ""},
 	}

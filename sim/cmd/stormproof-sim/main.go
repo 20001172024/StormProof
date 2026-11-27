@@ -73,6 +73,7 @@ type options struct {
 	clients            int
 	membership         bool
 	parallel           int
+	batch              bool
 }
 
 // run is main without the os.Exit, so tests can call it.
@@ -113,6 +114,7 @@ func parseFlags(args []string, stderr io.Writer) (options, error) {
 	fl.StringVar(&o.bug, "bug", "", `plant a bug: "fsync", or for raft "dedup", "local-reads", "read-quorum", "snapshot-sessions", "no-prevote"`)
 	fl.IntVar(&o.clients, "clients", raftsim.DefaultClients, "simulated KV clients (raft only)")
 	fl.IntVar(&o.parallel, "parallel", runtime.NumCPU(), "without -seed: seeds to run at once (results don't depend on it)")
+	fl.BoolVar(&o.batch, "batch", false, "raft only: process events in batches, as a busy server does (each event waits for the node's next one)")
 	fl.BoolVar(&o.membership, "membership", false, "raft only: add two spare servers and an admin that adds and removes servers during the run (-nodes is the initial configuration)")
 	if err := fl.Parse(args); err != nil {
 		return o, err
@@ -174,6 +176,7 @@ func (o options) config(seed uint64, trace io.Writer) sim.Config {
 	switch o.node {
 	case "raft":
 		ro := raftsim.DefaultOptions
+		ro.Batch = o.batch
 		switch o.bug {
 		case "fsync":
 			ro.SkipSync = true
@@ -385,6 +388,9 @@ func (o options) replayCommand(seed uint64, profile string) string {
 	}
 	if o.membership {
 		args = append(args, "-membership")
+	}
+	if o.batch {
+		args = append(args, "-batch")
 	}
 	if o.bug != "" {
 		args = append(args, "-bug "+o.bug)
