@@ -9,7 +9,7 @@ import (
 // cluster is a tiny synchronous test network: messages are delivered in
 // FIFO order until none are left. Tests drive elections by ticking one node.
 type cluster struct {
-	t       *testing.T
+	t       testing.TB
 	ids     []NodeID
 	nodes   map[NodeID]*Node
 	applied map[NodeID][]Entry
@@ -21,7 +21,7 @@ type cluster struct {
 	preVote bool
 }
 
-func newCluster(t *testing.T, size int) *cluster {
+func newCluster(t testing.TB, size int) *cluster {
 	t.Helper()
 	c := &cluster{t: t, nodes: map[NodeID]*Node{}, applied: map[NodeID][]Entry{}, reads: map[NodeID][]ReadState{}, snaps: map[NodeID][]Snapshot{}}
 	for i := 1; i <= size; i++ {
