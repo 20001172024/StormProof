@@ -7,7 +7,7 @@ import (
 )
 
 // TraceVersion is bumped whenever the trace format changes incompatibly.
-const TraceVersion = 1
+const TraceVersion = 2
 
 // Trace record types.
 const (
@@ -43,6 +43,7 @@ type Record struct {
 	Step   int             `json:"step"` // index of the event that produced this record
 	T      Time            `json:"t"`    // virtual time in microseconds
 	Type   string          `json:"type"`
+	ID     uint64          `json:"id,omitempty"` // message ID: the same on a send and on each delivery or drop of it
 	Node   NodeID          `json:"node,omitempty"`
 	From   NodeID          `json:"from,omitempty"`
 	To     NodeID          `json:"to,omitempty"`

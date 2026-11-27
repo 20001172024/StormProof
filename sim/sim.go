@@ -151,6 +151,7 @@ type simulation struct {
 	quiet      bool          // the quiet period has started
 	invariants []Invariant
 	trace      *traceWriter
+	msgID      uint64 // ID of the last message sent, for matching sends to deliveries in the trace
 	res        Result
 	err        error // a harness error that stops the run
 }
@@ -276,7 +277,7 @@ func (s *simulation) handle(e *event) {
 		}
 
 	case evDeliver:
-		s.deliver(e.msg)
+		s.deliver(e.msg, e.msgID)
 
 	case evFaultCheck:
 		s.rollFaults()
@@ -392,22 +393,24 @@ func (s *simulation) afterCall(n *node, msgs []Message, err error) {
 
 func (s *simulation) send(m Message, at Time) {
 	s.res.Stats.Sent++
-	s.trace.write(Record{Step: s.step, T: s.now, Type: RecSend, From: m.From, To: m.To, Kind: m.Body.Kind(), Msg: m.Body})
+	s.msgID++
+	id := s.msgID
+	s.trace.write(Record{Step: s.step, T: s.now, Type: RecSend, ID: id, From: m.From, To: m.To, Kind: m.Body.Kind(), Msg: m.Body})
 	delays := s.net.fate()
 	if delays == nil {
 		s.res.Stats.Dropped++
-		s.trace.write(Record{Step: s.step, T: s.now, Type: RecDrop, From: m.From, To: m.To, Kind: m.Body.Kind(), Reason: "lost"})
+		s.trace.write(Record{Step: s.step, T: s.now, Type: RecDrop, ID: id, From: m.From, To: m.To, Kind: m.Body.Kind(), Reason: "lost"})
 		return
 	}
 	for _, d := range delays {
-		s.q.push(&event{at: at + d, kind: evDeliver, msg: m})
+		s.q.push(&event{at: at + d, kind: evDeliver, msg: m, msgID: id})
 	}
 }
 
 // deliver hands a message to its destination. Partitions are checked here,
 // at delivery time, so messages already in flight when a partition starts
 // are cut off too.
-func (s *simulation) deliver(m Message) {
+func (s *simulation) deliver(m Message, id uint64) {
 	n := s.node(m.To)
 	reason := ""
 	switch {
@@ -418,11 +421,11 @@ func (s *simulation) deliver(m Message) {
 	}
 	if reason != "" {
 		s.res.Stats.Dropped++
-		s.trace.write(Record{Step: s.step, T: s.now, Type: RecDrop, From: m.From, To: m.To, Kind: m.Body.Kind(), Reason: reason})
+		s.trace.write(Record{Step: s.step, T: s.now, Type: RecDrop, ID: id, From: m.From, To: m.To, Kind: m.Body.Kind(), Reason: reason})
 		return
 	}
 	s.res.Stats.Delivered++
-	s.trace.write(Record{Step: s.step, T: s.now, Type: RecDeliver, From: m.From, To: m.To, Kind: m.Body.Kind()})
+	s.trace.write(Record{Step: s.step, T: s.now, Type: RecDeliver, ID: id, From: m.From, To: m.To, Kind: m.Body.Kind()})
 	msgs, err := s.call(n, func() ([]Message, error) { return n.proc.Step(m) })
 	if s.res.Violation != nil {
 		return // it panicked

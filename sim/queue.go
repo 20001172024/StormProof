@@ -22,6 +22,7 @@ type event struct {
 	node        NodeID  // evTick, evRestart
 	incarnation int     // evTick: ignore the tick if the node restarted since
 	msg         Message // evDeliver
+	msgID       uint64  // evDeliver: the ID the send was traced with
 }
 
 // eventHeap implements heap.Interface (Go's standard binary heap, in
