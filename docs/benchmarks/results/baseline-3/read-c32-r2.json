@@ -1,0 +1,37 @@
+{
+  "label": "baseline-3 read-c32-r2",
+  "when": "2026-11-27T11:43:30.144489096Z",
+  "config": {
+    "Clients": 32,
+    "Duration": 10000000000,
+    "Warmup": 3000000000,
+    "Reads": 0.9,
+    "Keys": 1000,
+    "ValueSize": 100,
+    "OpTimeout": 5000000000,
+    "Seed": 1
+  },
+  "measured_ns": 10000000000,
+  "ops": 33996,
+  "ops_per_sec": 3399.6,
+  "by_op": {
+    "get": {
+      "count": 30569,
+      "errors": 0,
+      "p50_ms": 7.362,
+      "p95_ms": 21.325,
+      "p99_ms": 28.192,
+      "max_ms": 51.755,
+      "mean_ms": 9.314
+    },
+    "put": {
+      "count": 3427,
+      "errors": 0,
+      "p50_ms": 8.172,
+      "p95_ms": 22.141,
+      "p99_ms": 30.146,
+      "max_ms": 42.593,
+      "mean_ms": 10.094
+    }
+  }
+}

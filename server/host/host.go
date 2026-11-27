@@ -59,6 +59,12 @@ type Config struct {
 	// SnapshotEvery takes a snapshot once this many entries have been
 	// applied since the last one; 0 never snapshots.
 	SnapshotEvery uint64
+	// KeepHistory keeps every applied entry, every snapshot, and a hash of
+	// the whole key-value store after every applied entry (see Applied,
+	// Snapshots and States), for the simulator's state machine safety
+	// check. The lists only grow and each hash costs time proportional to
+	// the store's size, so only the simulator turns it on.
+	KeepHistory bool
 
 	// Planted bugs for testing the checkers; never set them otherwise.
 	Knobs      raft.TestingKnobs
@@ -221,6 +227,34 @@ func (h *Host) Handle(req Request) (Output, error) {
 	return h.handleReady()
 }
 
+// Batch is several events handed to the node together. Processing them
+// with one Ready means one write to the WAL, one fsync, and one send of the
+// resulting messages, instead of one of each per event: under load that is
+// the difference between an fsync per request and an fsync per batch.
+type Batch struct {
+	Ticks    int
+	Messages []raft.Message
+	Requests []Request
+}
+
+// Process handles a batch: its ticks, then its messages, then its requests,
+// then one Ready. The events arrived concurrently, so any order is one they
+// could have arrived in. Raft allows any number of steps between Readys;
+// what matters is that their state is persisted before their messages go
+// out, which handleReady does as for a single event.
+func (h *Host) Process(b Batch) (Output, error) {
+	for range b.Ticks {
+		h.node.Tick()
+	}
+	for _, m := range b.Messages {
+		h.node.Step(m)
+	}
+	for _, r := range b.Requests {
+		h.handleClient(r)
+	}
+	return h.handleReady()
+}
+
 // Propose proposes a KV command that no client is waiting for (the
 // simulator's internal workload). It returns raft.ErrNotLeader if this
 // server is not the leader.
@@ -247,19 +281,24 @@ func (h *Host) LogVersion() uint64 { return h.logVersion }
 
 // Applied returns the entries applied since this Host started, in order.
 // Entries covered by a snapshot it loaded are not in it.
+// Only with Config.KeepHistory.
 func (h *Host) Applied() []raft.Entry { return h.applied }
 
 // AppliedIndex is the index of the last entry reflected in the store.
 func (h *Host) AppliedIndex() uint64 { return h.appliedIndex }
 
-// Snapshots returns every snapshot this Host took or installed.
+// Snapshots returns every snapshot this Host took or installed. Only with
+// Config.KeepHistory.
 func (h *Host) Snapshots() []raft.Snapshot { return h.snapshots }
 
 // States returns the store's state hash after every index this Host applied
-// or loaded.
+// or loaded. Only with Config.KeepHistory.
 func (h *Host) States() []IndexedState { return h.states }
 
 func (h *Host) recordState() {
+	if !h.cfg.KeepHistory {
+		return
+	}
 	f := fnv.New64a()
 	_, _ = f.Write(h.store.Snapshot()) // hash.Hash.Write never fails
 	h.states = append(h.states, IndexedState{Index: h.appliedIndex, Hash: f.Sum64()})
@@ -346,7 +385,9 @@ func (h *Host) handleReady() (Output, error) {
 	if len(rd.Entries) > 0 {
 		h.logVersion++
 	}
-	h.applied = append(h.applied, rd.CommittedEntries...)
+	if h.cfg.KeepHistory {
+		h.applied = append(h.applied, rd.CommittedEntries...)
+	}
 	for _, e := range rd.CommittedEntries {
 		h.apply(e)
 	}
@@ -441,7 +482,9 @@ func (h *Host) persistSnapshot(s raft.Snapshot, after []raft.Entry) error {
 	if err := h.wal.Compact(wal.SnapshotMeta{Index: s.Index, Term: s.Term}, h.hardState(), after); err != nil {
 		return err
 	}
-	h.snapshots = append(h.snapshots, s)
+	if h.cfg.KeepHistory {
+		h.snapshots = append(h.snapshots, s)
+	}
 	h.logVersion++
 	return snap.Prune(h.cfg.FS, s.Index)
 }

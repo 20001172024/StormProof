@@ -26,6 +26,12 @@ type Options struct {
 	// PreVote turns on Raft's pre-vote round; on by default.
 	PreVote bool
 
+	// Batch processes events the way a busy real server does: each
+	// delivered message or client request is held until the node's next
+	// event, and then both (with any tick) go to the Host as one batch,
+	// with one Ready. That exercises Readys that cover several steps.
+	Batch bool
+
 	// ProposeProb is the chance that a leader proposes a new command on a
 	// tick. ProposeUntil stops proposals at that virtual time, so the
 	// cluster can finish replicating before the run ends; 0 means proposals
@@ -85,6 +91,7 @@ type Process struct {
 	opts     Options
 	host     *host.Host
 	proposed int
+	pending  host.Batch // with Options.Batch: events held for the next one
 }
 
 // body wraps a raft.Message so the simulator can carry it. Embedding the
@@ -125,6 +132,7 @@ func open(env sim.Env, o Options) (*Process, error) {
 		SegmentSize:    segment,
 		UnsafeNoSync:   o.SkipSync,
 		SnapshotEvery:  o.SnapshotEvery,
+		KeepHistory:    true, // for the state machine safety invariant
 		Knobs:          o.Knobs,
 		KVKnobs:        kv.TestingKnobs{NoDedup: o.NoDedup, SnapshotDropsSessions: o.SnapshotDropsSessions},
 		LocalReads:     o.LocalReads,
@@ -196,7 +204,16 @@ func (p *Process) TraceState() any {
 
 // Tick implements sim.Process.
 func (p *Process) Tick() ([]sim.Message, error) {
-	out, err := p.host.Tick()
+	var out host.Output
+	var err error
+	if p.opts.Batch {
+		b := p.pending
+		p.pending = host.Batch{}
+		b.Ticks++
+		out, err = p.host.Process(b)
+	} else {
+		out, err = p.host.Tick()
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -212,6 +229,28 @@ func (p *Process) Tick() ([]sim.Message, error) {
 func (p *Process) Step(m sim.Message) ([]sim.Message, error) {
 	var out host.Output
 	var err error
+	if p.opts.Batch {
+		// Hold the first event; process it with the second.
+		held := len(p.pending.Messages) + len(p.pending.Requests)
+		switch b := m.Body.(type) {
+		case body:
+			p.pending.Messages = append(p.pending.Messages, b.Message)
+		case clientRequest:
+			p.pending.Requests = append(p.pending.Requests, host.Request{Client: uint64(m.From), Cmd: b.Cmd, Conf: b.Conf})
+		default:
+			return nil, fmt.Errorf("unexpected message %T", m.Body)
+		}
+		if held == 0 {
+			return nil, nil
+		}
+		b := p.pending
+		p.pending = host.Batch{}
+		out, err = p.host.Process(b)
+		if err != nil {
+			return nil, err
+		}
+		return toSim(out), nil
+	}
 	switch b := m.Body.(type) {
 	case body:
 		out, err = p.host.Step(b.Message)

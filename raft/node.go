@@ -167,6 +167,10 @@ type Node struct {
 	// iterated in an order that matters.
 	nextIndex  map[NodeID]uint64 // next entry to send to each follower
 	matchIndex map[NodeID]uint64 // highest entry known to be replicated on each follower
+	// Flow control (see sendAppend): whether a batch of entries is
+	// outstanding to each follower, and the last index it carried.
+	inflight map[NodeID]bool
+	sentUpTo map[NodeID]uint64
 
 	// ReadIndex (dissertation §6.4). readSeq numbers each read; heartbeats
 	// carry the latest number as their Context. pendingReads wait for a
@@ -238,7 +242,7 @@ func (n *Node) Tick() {
 		n.heartbeatElapsed++
 		if n.heartbeatElapsed >= n.cfg.HeartbeatTicks {
 			n.heartbeatElapsed = 0
-			n.broadcastAppend()
+			n.broadcastHeartbeat()
 		}
 		return
 	}
@@ -306,7 +310,7 @@ func (n *Node) ReadIndex(id uint64) error {
 	n.pendingReads = append(n.pendingReads, pendingRead{
 		ReadState: rs, seq: n.readSeq, acks: map[NodeID]bool{n.id: true},
 	})
-	n.broadcastAppend() // ask for acknowledgements now, rather than at the next heartbeat
+	n.broadcastReadCheck() // ask for acknowledgements now, rather than at the next heartbeat
 	return nil
 }
 
@@ -464,6 +468,7 @@ func (n *Node) becomeFollower(term Term, leader NodeID) {
 	n.leader = leader
 	n.votes = nil
 	n.nextIndex, n.matchIndex = nil, nil
+	n.inflight, n.sentUpTo = nil, nil
 	// Reads still waiting for confirmation can't be confirmed any more: the
 	// caller sees this node is no longer leader and has them retried.
 	// Already confirmed ones (readStates) stay valid.
@@ -481,6 +486,8 @@ func (n *Node) becomeLeader() {
 	// last log index + 1; matchIndex: initialized to 0".
 	n.nextIndex = map[NodeID]uint64{}
 	n.matchIndex = map[NodeID]uint64{}
+	n.inflight = map[NodeID]bool{}
+	n.sentUpTo = map[NodeID]uint64{}
 	for _, p := range n.others() {
 		n.nextIndex[p] = n.log.lastIndex() + 1
 		n.matchIndex[p] = 0

@@ -255,9 +255,16 @@ func (s *Server) deliver(m raft.Message) {
 	}
 }
 
-// run is the event loop. Each event is one call into the Host; its output
-// is then sent out: Raft messages through the transport, responses to the
-// client calls waiting for them.
+// maxBatch caps the events processed together, so one batch's latency
+// stays bounded under heavy load.
+const maxBatch = 512
+
+// run is the event loop. It waits for an event, then takes every other
+// event already waiting (up to maxBatch) and hands them to the Host as one
+// batch: one Ready, so one WAL write and one fsync for all of them. Under
+// light load a batch is a single event, as before; under heavy load the
+// fsync cost is shared. The output is then sent out: Raft messages through
+// the transport, responses to the client calls waiting for them.
 func (s *Server) run() {
 	defer close(s.done)
 	ticker := time.NewTicker(s.cfg.Tick)
@@ -265,22 +272,39 @@ func (s *Server) run() {
 
 	waiting := map[uint64]chan host.Response{}
 	var nextToken uint64
+	addCall := func(b *host.Batch, c call) {
+		nextToken++
+		waiting[nextToken] = c.resp
+		c.req.Client = nextToken
+		b.Requests = append(b.Requests, c.req)
+	}
 	for {
-		var out host.Output
-		var err error
+		var b host.Batch
 		select {
 		case <-s.stop:
 			return
 		case <-ticker.C:
-			out, err = s.host.Tick()
+			b.Ticks++
 		case m := <-s.inbox:
-			out, err = s.host.Step(m)
+			b.Messages = append(b.Messages, m)
 		case c := <-s.calls:
-			nextToken++
-			waiting[nextToken] = c.resp
-			c.req.Client = nextToken
-			out, err = s.host.Handle(c.req)
+			addCall(&b, c)
 		}
+	drain:
+		for n := 1; n < maxBatch; n++ {
+			select {
+			case m := <-s.inbox:
+				b.Messages = append(b.Messages, m)
+			case c := <-s.calls:
+				addCall(&b, c)
+			case <-ticker.C:
+				b.Ticks++
+			default:
+				break drain
+			}
+		}
+		out, err := s.host.Process(b)
+		s.metrics.observeBatch(len(b.Messages) + len(b.Requests) + b.Ticks)
 		if err != nil {
 			// Storage failed. Nothing more can be promised durable, so stop:
 			// the safe response to, for example, a failed fsync.

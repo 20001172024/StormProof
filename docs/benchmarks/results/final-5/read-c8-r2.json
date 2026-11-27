@@ -1,0 +1,37 @@
+{
+  "label": "final-5 read-c8-r2",
+  "when": "2026-11-27T12:14:35.497646884Z",
+  "config": {
+    "Clients": 8,
+    "Duration": 10000000000,
+    "Warmup": 3000000000,
+    "Reads": 0.9,
+    "Keys": 1000,
+    "ValueSize": 100,
+    "OpTimeout": 5000000000,
+    "Seed": 1
+  },
+  "measured_ns": 10000000000,
+  "ops": 29446,
+  "ops_per_sec": 2944.6,
+  "by_op": {
+    "get": {
+      "count": 26462,
+      "errors": 0,
+      "p50_ms": 2.28,
+      "p95_ms": 4.928,
+      "p99_ms": 7.455,
+      "max_ms": 27.147,
+      "mean_ms": 2.568
+    },
+    "put": {
+      "count": 2984,
+      "errors": 0,
+      "p50_ms": 3.551,
+      "p95_ms": 6.871,
+      "p99_ms": 10.592,
+      "max_ms": 27.191,
+      "mean_ms": 3.956
+    }
+  }
+}

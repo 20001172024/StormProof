@@ -57,6 +57,7 @@ jobs:
         mode:
           - { name: fixed, flags: "" }
           - { name: membership, flags: "-membership" }
+          - { name: batched, flags: "-batch" }
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5

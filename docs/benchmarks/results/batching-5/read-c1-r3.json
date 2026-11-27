@@ -1,0 +1,37 @@
+{
+  "label": "batching-5 read-c1-r3",
+  "when": "2026-11-27T11:28:45.244869066Z",
+  "config": {
+    "Clients": 1,
+    "Duration": 10000000000,
+    "Warmup": 3000000000,
+    "Reads": 0.9,
+    "Keys": 1000,
+    "ValueSize": 100,
+    "OpTimeout": 5000000000,
+    "Seed": 1
+  },
+  "measured_ns": 10000000000,
+  "ops": 8785,
+  "ops_per_sec": 878.5,
+  "by_op": {
+    "get": {
+      "count": 7871,
+      "errors": 0,
+      "p50_ms": 0.894,
+      "p95_ms": 1.57,
+      "p99_ms": 2.531,
+      "max_ms": 12.281,
+      "mean_ms": 0.972
+    },
+    "put": {
+      "count": 914,
+      "errors": 0,
+      "p50_ms": 2.315,
+      "p95_ms": 3.937,
+      "p99_ms": 5.225,
+      "max_ms": 11.131,
+      "mean_ms": 2.483
+    }
+  }
+}

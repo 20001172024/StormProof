@@ -53,6 +53,18 @@ services:
     environment:
       STORMPROOF_ENDPOINTS: "node1:7000,node2:7000,node3:7000"
 
+  # The load generator (bench/): writes results to ./results on the host.
+  #   docker compose -f deploy/docker/docker-compose.yml run --rm bench -clients 16 -reads 0.5
+  bench:
+    image: stormproof:latest
+    profiles: ["tools"]
+    entrypoint: ["stormproof-bench"]
+    user: "0"
+    working_dir: /results
+    volumes: ["./results:/results"]
+    environment:
+      STORMPROOF_ENDPOINTS: "node1:7000,node2:7000,node3:7000"
+
   prometheus:
     image: prom/prometheus:v2.55.1
     command: ["--config.file=/etc/prometheus/prometheus.yml"]

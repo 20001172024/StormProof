@@ -126,3 +126,40 @@ func TestNotLeader(t *testing.T) {
 		t.Fatalf("%+v, %v", out.Responses, err)
 	}
 }
+
+// The history the simulator's invariants read (every applied entry,
+// snapshot and state hash) is kept only on request: a real server would
+// otherwise grow it forever and hash the whole store on every write.
+func TestKeepHistory(t *testing.T) {
+	for _, keep := range []bool{false, true} {
+		disk := sim.NewDisk(sim.DiskConfig{}, sim.NewRand(1, "disk"))
+		cfg := testConfig(disk, 1)
+		cfg.KeepHistory = keep
+		cfg.SnapshotEvery = 5
+		h, err := Open(cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for h.Status().Role != raft.Leader {
+			if _, err := h.Tick(); err != nil {
+				t.Fatal(err)
+			}
+		}
+		for i := range 12 {
+			if _, err := h.Handle(Request{Client: 1, Cmd: kv.Command{ClientID: 7, RequestID: uint64(i + 1), Op: kv.OpPut, Key: "k", Value: []byte("v")}}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if h.AppliedIndex() < 12 {
+			t.Fatalf("applied only %d entries", h.AppliedIndex())
+		}
+		got := []int{len(h.Applied()), len(h.Snapshots()), len(h.States())}
+		if keep && (got[0] < 12 || got[1] < 2 || got[2] < 12) {
+			t.Errorf("KeepHistory: applied, snapshots, states = %v; want them all kept", got)
+		}
+		if !keep && (got[0] != 0 || got[1] != 0 || got[2] != 0) {
+			t.Errorf("without KeepHistory: applied, snapshots, states = %v; want none kept", got)
+		}
+		_ = h.Close()
+	}
+}

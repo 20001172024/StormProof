@@ -1,0 +1,37 @@
+{
+  "label": "batching-5 mixed-c32-r2",
+  "when": "2026-11-27T11:27:51.077978229Z",
+  "config": {
+    "Clients": 32,
+    "Duration": 10000000000,
+    "Warmup": 3000000000,
+    "Reads": 0.5,
+    "Keys": 1000,
+    "ValueSize": 100,
+    "OpTimeout": 5000000000,
+    "Seed": 1
+  },
+  "measured_ns": 10000000000,
+  "ops": 42174,
+  "ops_per_sec": 4217.4,
+  "by_op": {
+    "get": {
+      "count": 21018,
+      "errors": 0,
+      "p50_ms": 5.856,
+      "p95_ms": 11.178,
+      "p99_ms": 16.791,
+      "max_ms": 46.119,
+      "mean_ms": 6.331
+    },
+    "put": {
+      "count": 21156,
+      "errors": 0,
+      "p50_ms": 8.196,
+      "p95_ms": 14.523,
+      "p99_ms": 21.663,
+      "max_ms": 46.687,
+      "mean_ms": 8.802
+    }
+  }
+}
