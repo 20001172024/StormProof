@@ -251,10 +251,11 @@ needed to reproduce the run (seed, cluster size, duration, tick interval
 and the full fault profile).
 
 ```json
-{"type":"header","version":1,"seed":999,"nodes":3,"duration":10000000,"tick_interval":10000,"profile":{"name":"chaos",...}}
+{"type":"header","version":2,"seed":999,"nodes":3,"duration":10000000,"tick_interval":10000,"profile":{"name":"chaos",...}}
 {"step":0,"t":0,"type":"start","node":1}
-{"step":12,"t":43120,"type":"send","from":2,"to":1,"kind":"counter","msg":{"value":3}}
-{"step":12,"t":43120,"type":"drop","from":2,"to":3,"kind":"counter","reason":"lost"}
+{"step":12,"t":43120,"type":"send","id":31,"from":2,"to":1,"kind":"counter","msg":{"value":3}}
+{"step":12,"t":43120,"type":"send","id":32,"from":2,"to":3,"kind":"counter","msg":{"value":3}}
+{"step":12,"t":43120,"type":"drop","id":32,"from":2,"to":3,"kind":"counter","reason":"lost"}
 {"step":267,"t":700000,"type":"crash","node":2,"kind":"machine","reason":"injected"}
 {"step":355,"t":1018522,"type":"state","node":2,"state":{"value":0}}
 {"step":355,"t":1018522,"type":"violation","kind":"counter-monotonic","reason":"node 2 counter went back from 22 to 0"}
@@ -265,10 +266,16 @@ and the full fault profile).
 - Record types: `start`, `crash`, `send`, `deliver`, `drop` (with reason
   `lost`, `partition` or `node down`), `state`, `partition`, `heal` and
   `violation`, which is always last.
+- Every sent message gets an `id`, repeated on each `deliver` or `drop` of
+  it. Messages are delayed by random amounts and sometimes duplicated, so
+  without it a delivery couldn't be matched to its send.
 - Ticks are not traced on their own (there are a hundred per node per
   virtual second); their effects show up as `state` and `send` records.
 - A `state` record is written whenever a node's traced state changes. The
-  visualizer can rebuild each node's state at any step from these.
+  visualizer can rebuild each node's state at any step from these. For a
+  Raft server it is the node's status plus its applied index and its log,
+  run-length encoded by term (`"log":[{"from":1,"term":1,"count":40},...]`),
+  which is all the visualizer needs to draw the log.
 
 JSON Lines (rather than one big JSON array) means a run that dies still
 leaves a readable trace up to that point, and the file can be streamed.
@@ -786,3 +793,63 @@ Run in the development container: both clusters passed; the first write
 after killing the leader took 586 ms (3 servers) and 513 ms (5), counting
 the time to start the CLI container; Prometheus scraped all five targets of
 the 5-server cluster, with exactly one reporting `is_leader`.
+
+## 16. The visualizer (M8)
+
+`visualizer/` is a static React + TypeScript site (built with Vite) that
+loads a trace and lets you scrub through it. There is no backend: a trace
+is read from a file you drop on the page, or fetched from the example
+traces shipped with the site. GitHub Pages publishes it on every merge to
+main that touches it.
+
+**What the trace had to gain.** Two things were missing for drawing a run,
+both added on the Go side (trace version 2, section 7):
+
+- *Message IDs.* A `deliver` record named only sender, receiver and kind.
+  With random delays and duplication, two RequestVotes from S1 to S2 can
+  arrive in either order, so a delivery couldn't be tied to its send (and
+  to its contents, or its send time for animating it). Each send now gets
+  an ID, repeated on every delivery or drop of it.
+- *Each server's log.* State records had the log's last index and term,
+  not the entries' terms, which are what show logs diverging and
+  converging. The full log is long and mostly runs of one term, so it is
+  run-length encoded: `[{"from":1,"term":1,"count":40},...]`.
+
+**Rebuilding a moment.** The trace only records changes, so the cluster at
+step *f* is every record up to *f* applied in order. Replaying from the
+start on every scrub would be slow on long traces, so the replayer keeps a
+checkpoint every 256 steps and replays forward from the nearest one; a
+test checks it agrees with a replay from the start on every example trace.
+Messages on the wire are found without a scan of every message: a copy is
+in flight from its send to its arrival, and no copy is in flight longer
+than the longest delay seen, so only sends that recent are looked at.
+While playing, virtual time advances smoothly and messages are drawn
+partway along their link (sent at *t₀*, arriving at *t₁*, drawn at
+(*t* − *t₀*)/(*t₁* − *t₀*)), so they glide rather than jump between steps.
+
+**Views.** The cluster as a network (role colors, crashed servers dashed,
+non-members faded, cut links as red dashed arrows, one per blocked
+direction so one-way partitions are visible as such, drops flashing as red
+crosses); a card per server (term, vote, leader, commit and applied index,
+snapshot, configuration, and the whole log drawn to a common scale); the
+last 18 log indexes of every server side by side, each entry labelled with
+its term and dashed until committed; the event list around the current
+step; and a timeline marking new leaders, configuration changes, crashes,
+restarts, partitions, the quiet period and the violation, with a button
+(and the V key) to jump to the violation.
+
+**Example traces.** `visualizer/scripts/make-examples.sh` regenerates them
+from the simulator: a leader crashing twice, a leader cut off by a
+partition (two leaders in different terms until the heal), an isolated
+follower disrupting the leader when it rejoins (the problem pre-vote
+solves), membership changes, and the planted fsync bug ending in its
+term-monotonic violation. The descriptions on the site were checked
+against the traces.
+
+Picking them turned up a pitfall in the simulator's quiet period rather
+than in Raft: the quiet period stops new faults but doesn't heal a
+partition already in progress. With a quiet period shorter than the
+longest partition plus an election (here, 1 s against up to 2 s), a
+partition started just before it can outlast it, and the final check
+reports "no leader". The defaults (5 s quiet, partitions of at most 2 s)
+leave enough time, and the examples use 2.5 s.

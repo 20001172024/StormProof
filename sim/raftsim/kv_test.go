@@ -150,7 +150,7 @@ func TestSnapshotsHappen(t *testing.T) {
 	if res := run(t, cfg); res.Violation != nil {
 		t.Fatal(res.Violation)
 	}
-	if taken == 0 || !bytes.Contains(buf.Bytes(), []byte(`"type":"deliver","from"`)) ||
+	if taken == 0 || !bytes.Contains(buf.Bytes(), []byte(`"type":"deliver","id":`)) ||
 		!bytes.Contains(buf.Bytes(), []byte(`"kind":"InstallSnapshot"`)) {
 		t.Fatalf("snapshots taken: %d; InstallSnapshot in trace: %v", taken, bytes.Contains(buf.Bytes(), []byte("InstallSnapshot")))
 	}

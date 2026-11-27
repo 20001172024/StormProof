@@ -328,3 +328,20 @@ func seedCount(n uint64) uint64 {
 	}
 	return n
 }
+
+func TestTermRuns(t *testing.T) {
+	es := []raft.Entry{{Index: 6, Term: 2}, {Index: 7, Term: 2}, {Index: 8, Term: 3}, {Index: 9, Term: 5}, {Index: 10, Term: 5}}
+	got := termRuns(es)
+	want := []TermRun{{From: 6, Term: 2, Count: 2}, {From: 8, Term: 3, Count: 1}, {From: 9, Term: 5, Count: 2}}
+	if len(got) != len(want) {
+		t.Fatalf("got %+v", got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("run %d: got %+v, want %+v", i, got[i], want[i])
+		}
+	}
+	if len(termRuns(nil)) != 0 {
+		t.Fatal("empty log should have no runs")
+	}
+}
