@@ -2,20 +2,74 @@ package raft
 
 import "slices"
 
-// broadcastAppend sends AppendEntries to every follower: whatever entries
-// each is missing, or an empty heartbeat if it has them all.
+// Flow control. Figure 2 says what an AppendEntries carries, not when to
+// send one; that only affects speed, never safety, because every message
+// passes the log consistency check on arrival. The policy here is one
+// outstanding batch per follower:
+//
+//   - New entries go to a follower only when it has no batch outstanding
+//     (broadcastAppend, after a proposal). Otherwise they wait in the log,
+//     and the next batch carries all of them: under load, batches grow by
+//     themselves (dissertation §10.2.1 describes batching and pipelining).
+//   - A batch is settled when the follower acknowledges up to its last
+//     entry, or rejects it; then whatever has piled up goes out at once.
+//   - Heartbeats (broadcastHeartbeat, every HeartbeatTicks) send from
+//     nextIndex regardless, so a lost batch is resent within a heartbeat.
+//
+// Before this, every proposal and every acknowledgement that found more to
+// send resent all unacknowledged entries. Under steady load those chains of
+// send, acknowledge, send piled up faster than they finished, and write
+// throughput fell as clients were added.
+
+// broadcastAppend sends new entries to every follower without a batch
+// outstanding.
 func (n *Node) broadcastAppend() {
+	for _, p := range n.others() {
+		n.maybeSendAppend(p)
+	}
+}
+
+// broadcastHeartbeat sends AppendEntries to every follower, from its
+// nextIndex, whether or not a batch is outstanding: the heartbeat (Figure 2,
+// Leaders) and the retransmission of lost batches.
+func (n *Node) broadcastHeartbeat() {
 	for _, p := range n.others() {
 		n.sendAppend(p)
 	}
 }
 
+// broadcastReadCheck asks every follower to acknowledge this node as leader
+// now, for ReadIndex, with an AppendEntries that carries no entries: just
+// the check that the follower holds nextIndex-1, which it acknowledges
+// either way. Sending entries here too would resend every unacknowledged
+// entry for every read.
+func (n *Node) broadcastReadCheck() {
+	for _, p := range n.others() {
+		prev := n.nextIndex[p] - 1
+		if prev < n.log.snapIndex {
+			// The follower needs a snapshot. Don't resend it for every read: the
+			// next heartbeat carries the read's sequence number too.
+			n.maybeSendAppend(p)
+			continue
+		}
+		prevTerm, _ := n.log.term(prev)
+		n.send(Message{Type: MsgApp, To: p, PrevLogIndex: prev, PrevLogTerm: prevTerm,
+			LeaderCommit: n.commitIndex, Context: n.readSeq})
+	}
+}
+
+// maybeSendAppend sends to a follower unless a batch is outstanding.
+func (n *Node) maybeSendAppend(to NodeID) {
+	if !n.inflight[to] {
+		n.sendAppend(to)
+	}
+}
+
 // sendAppend sends one AppendEntries to a follower, starting at its
-// nextIndex. Every AppendEntries also acts as a heartbeat.
-//
-// Nothing is pipelined: until the follower replies, the next heartbeat
-// resends the same entries. Simple and obviously correct; the receiver
-// ignores entries it already has (rule 4), so the repeats are harmless.
+// nextIndex, and records the batch as outstanding if it carries entries.
+// Every AppendEntries also acts as a heartbeat. nextIndex only moves when
+// the follower answers, so until then a resend repeats the same entries;
+// the receiver skips entries it already has (rule 4).
 func (n *Node) sendAppend(to NodeID) {
 	next := n.nextIndex[to]
 	if next <= n.log.snapIndex {
@@ -23,19 +77,24 @@ func (n *Node) sendAppend(to NodeID) {
 		// snapshot instead (§7). It is resent with every heartbeat until the
 		// follower answers, like AppendEntries.
 		n.send(Message{Type: MsgSnap, To: to, Snapshot: n.snapshot, Context: n.readSeq})
+		n.inflight[to], n.sentUpTo[to] = true, n.log.snapIndex
 		return
 	}
 	prev := next - 1
 	prevTerm, _ := n.log.term(prev) // prev <= lastIndex, so it exists
+	entries := n.log.slice(next, next+uint64(n.cfg.MaxEntriesPerMsg))
 	n.send(Message{
 		Type:         MsgApp,
 		To:           to,
 		PrevLogIndex: prev,
 		PrevLogTerm:  prevTerm,
-		Entries:      n.log.slice(next, next+uint64(n.cfg.MaxEntriesPerMsg)),
+		Entries:      entries,
 		LeaderCommit: n.commitIndex,
 		Context:      n.readSeq,
 	})
+	if len(entries) > 0 {
+		n.inflight[to], n.sentUpTo[to] = true, entries[len(entries)-1].Index
+	}
 }
 
 // handleAppendEntries implements the AppendEntries receiver (Figure 2).
@@ -148,8 +207,14 @@ func (n *Node) handleAppendResponse(m Message) {
 			}
 		}
 		n.nextIndex[from] = max(n.nextIndex[from], n.matchIndex[from]+1)
+		// The batch is settled once the follower has everything it carried.
+		// (Acknowledgements of heartbeats and read checks, which carry
+		// nothing new, don't settle it.)
+		if n.matchIndex[from] >= n.sentUpTo[from] {
+			n.inflight[from] = false
+		}
 		if n.nextIndex[from] <= n.log.lastIndex() {
-			n.sendAppend(from) // more to send: keep going without waiting for the heartbeat
+			n.maybeSendAppend(from) // more to send: keep going without waiting for the heartbeat
 		}
 		return
 	}
@@ -173,6 +238,7 @@ func (n *Node) handleAppendResponse(m Message) {
 	next = max(next, n.matchIndex[from]+1)
 	next = min(next, n.log.lastIndex()+1)
 	n.nextIndex[from] = next
+	n.inflight[from] = false // a rejection settles the batch: retry from the new nextIndex
 	n.sendAppend(from)
 }
 

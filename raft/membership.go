@@ -163,12 +163,15 @@ func (n *Node) refreshConfig() {
 	for _, v := range n.others() {
 		if _, ok := n.nextIndex[v]; !ok {
 			n.nextIndex[v], n.matchIndex[v] = n.log.lastIndex()+1, 0
+			n.inflight[v], n.sentUpTo[v] = false, 0
 		}
 	}
 	for id := range n.nextIndex {
 		if !n.isVoter(id) {
 			delete(n.nextIndex, id)
 			delete(n.matchIndex, id)
+			delete(n.inflight, id)
+			delete(n.sentUpTo, id)
 		}
 	}
 }
