@@ -125,6 +125,7 @@ func open(env sim.Env, o Options) (*Process, error) {
 		SegmentSize:    segment,
 		UnsafeNoSync:   o.SkipSync,
 		SnapshotEvery:  o.SnapshotEvery,
+		KeepHistory:    true, // for the state machine safety invariant
 		Knobs:          o.Knobs,
 		KVKnobs:        kv.TestingKnobs{NoDedup: o.NoDedup, SnapshotDropsSessions: o.SnapshotDropsSessions},
 		LocalReads:     o.LocalReads,

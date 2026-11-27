@@ -59,6 +59,12 @@ type Config struct {
 	// SnapshotEvery takes a snapshot once this many entries have been
 	// applied since the last one; 0 never snapshots.
 	SnapshotEvery uint64
+	// KeepHistory keeps every applied entry, every snapshot, and a hash of
+	// the whole key-value store after every applied entry (see Applied,
+	// Snapshots and States), for the simulator's state machine safety
+	// check. The lists only grow and each hash costs time proportional to
+	// the store's size, so only the simulator turns it on.
+	KeepHistory bool
 
 	// Planted bugs for testing the checkers; never set them otherwise.
 	Knobs      raft.TestingKnobs
@@ -247,19 +253,24 @@ func (h *Host) LogVersion() uint64 { return h.logVersion }
 
 // Applied returns the entries applied since this Host started, in order.
 // Entries covered by a snapshot it loaded are not in it.
+// Only with Config.KeepHistory.
 func (h *Host) Applied() []raft.Entry { return h.applied }
 
 // AppliedIndex is the index of the last entry reflected in the store.
 func (h *Host) AppliedIndex() uint64 { return h.appliedIndex }
 
-// Snapshots returns every snapshot this Host took or installed.
+// Snapshots returns every snapshot this Host took or installed. Only with
+// Config.KeepHistory.
 func (h *Host) Snapshots() []raft.Snapshot { return h.snapshots }
 
 // States returns the store's state hash after every index this Host applied
-// or loaded.
+// or loaded. Only with Config.KeepHistory.
 func (h *Host) States() []IndexedState { return h.states }
 
 func (h *Host) recordState() {
+	if !h.cfg.KeepHistory {
+		return
+	}
 	f := fnv.New64a()
 	_, _ = f.Write(h.store.Snapshot()) // hash.Hash.Write never fails
 	h.states = append(h.states, IndexedState{Index: h.appliedIndex, Hash: f.Sum64()})
@@ -346,7 +357,9 @@ func (h *Host) handleReady() (Output, error) {
 	if len(rd.Entries) > 0 {
 		h.logVersion++
 	}
-	h.applied = append(h.applied, rd.CommittedEntries...)
+	if h.cfg.KeepHistory {
+		h.applied = append(h.applied, rd.CommittedEntries...)
+	}
 	for _, e := range rd.CommittedEntries {
 		h.apply(e)
 	}
@@ -441,7 +454,9 @@ func (h *Host) persistSnapshot(s raft.Snapshot, after []raft.Entry) error {
 	if err := h.wal.Compact(wal.SnapshotMeta{Index: s.Index, Term: s.Term}, h.hardState(), after); err != nil {
 		return err
 	}
-	h.snapshots = append(h.snapshots, s)
+	if h.cfg.KeepHistory {
+		h.snapshots = append(h.snapshots, s)
+	}
 	h.logVersion++
 	return snap.Prune(h.cfg.FS, s.Index)
 }
