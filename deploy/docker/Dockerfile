@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-# StormProof server and CLI image. Build from the repository root:
+# StormProof server, CLI and load generator image. Build from the repository root:
 #
 #   docker build -f deploy/docker/Dockerfile -t stormproof .
 #
@@ -21,7 +21,8 @@ COPY . .
 # Static binaries (no cgo), so the runtime image needs no libc beyond what
 # alpine has, and builds are reproducible (-trimpath).
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/stormproof-server ./server/cmd/stormproof-server \
- && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/stormproof-cli ./client/cmd/stormproof-cli
+ && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/stormproof-cli ./client/cmd/stormproof-cli \
+ && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/stormproof-bench ./bench/cmd/stormproof-bench
 
 # alpine rather than distroless: compose health checks need a tool (wget)
 # to call /healthz, and it's small either way.
