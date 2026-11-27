@@ -251,10 +251,11 @@ needed to reproduce the run (seed, cluster size, duration, tick interval
 and the full fault profile).
 
 ```json
-{"type":"header","version":1,"seed":999,"nodes":3,"duration":10000000,"tick_interval":10000,"profile":{"name":"chaos",...}}
+{"type":"header","version":2,"seed":999,"nodes":3,"duration":10000000,"tick_interval":10000,"profile":{"name":"chaos",...}}
 {"step":0,"t":0,"type":"start","node":1}
-{"step":12,"t":43120,"type":"send","from":2,"to":1,"kind":"counter","msg":{"value":3}}
-{"step":12,"t":43120,"type":"drop","from":2,"to":3,"kind":"counter","reason":"lost"}
+{"step":12,"t":43120,"type":"send","id":31,"from":2,"to":1,"kind":"counter","msg":{"value":3}}
+{"step":12,"t":43120,"type":"send","id":32,"from":2,"to":3,"kind":"counter","msg":{"value":3}}
+{"step":12,"t":43120,"type":"drop","id":32,"from":2,"to":3,"kind":"counter","reason":"lost"}
 {"step":267,"t":700000,"type":"crash","node":2,"kind":"machine","reason":"injected"}
 {"step":355,"t":1018522,"type":"state","node":2,"state":{"value":0}}
 {"step":355,"t":1018522,"type":"violation","kind":"counter-monotonic","reason":"node 2 counter went back from 22 to 0"}
@@ -265,10 +266,16 @@ and the full fault profile).
 - Record types: `start`, `crash`, `send`, `deliver`, `drop` (with reason
   `lost`, `partition` or `node down`), `state`, `partition`, `heal` and
   `violation`, which is always last.
+- Every sent message gets an `id`, repeated on each `deliver` or `drop` of
+  it. Messages are delayed by random amounts and sometimes duplicated, so
+  without it a delivery couldn't be matched to its send.
 - Ticks are not traced on their own (there are a hundred per node per
   virtual second); their effects show up as `state` and `send` records.
 - A `state` record is written whenever a node's traced state changes. The
-  visualizer can rebuild each node's state at any step from these.
+  visualizer can rebuild each node's state at any step from these. For a
+  Raft server it is the node's status plus its applied index and its log,
+  run-length encoded by term (`"log":[{"from":1,"term":1,"count":40},...]`),
+  which is all the visualizer needs to draw the log.
 
 JSON Lines (rather than one big JSON array) means a run that dies still
 leaves a readable trace up to that point, and the file can be streamed.
